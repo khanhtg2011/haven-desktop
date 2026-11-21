@@ -1,0 +1,4947 @@
+// ═══════════════════════════════════════════════════════════
+// Haven Desktop: Main Process
+// ═══════════════════════════════════════════════════════════
+
+const { handleClosedOutput } = require('./stdio-errors');
+handleClosedOutput(process.stdout);
+handleClosedOutput(process.stderr);
+
+const {
+  app, BrowserWindow, BrowserView, ipcMain, Notification, Tray, Menu,
+  nativeImage, desktopCapturer, session, dialog, shell, screen, globalShortcut,
+  clipboard, webContents
+} = require('electron');
+const path  = require('path');
+const fs    = require('fs');
+const os    = require('os');
+const { pathToFileURL } = require('url');
+const Store = require('electron-store');
+const { ServerManager }      = require('./server-manager');
+const { AudioCaptureManager } = require('./audio-capture');
+const { normalizeHost, isLocalHost, certDecision } = require('./cert-trust');
+const { applyDisplayColorWorkarounds } = require('./color-profile');
+const {
+  DEFAULT_LOCALE, SYSTEM_LANGUAGE, SUPPORTED_LOCALES, normalizeLocale,
+  resolveLocale, translate, getLocaleMetadata,
+} = require('../i18n');
+const { PipeWireStreamRouter } = require('./pipewire-stream-router');
+const {
+  createAudioCaptureController,
+  normalizeAudioMode,
+  pairWindowAudio,
+  resolveAudioSelection,
+  windowHandleOf,
+} = require('./screen-share-audio');
+const { normalizeVideoEncoderPreference } = require('./screen-share-video');
+const { resolveRefreshedSource } = require('./screen-source');
+const { isTrustedMainFrame, getHttpOrigin } = require('./ipc-security');
+const {
+  isTypingKeyAccelerator, isHoldShortcut, shortcutKeyRefused, dialogHost, notificationTitle,
+  permissionAllowed, createSignInRoundTrip, isHttpTwin,
+} = require('./ipc-policy');
+const { x11LaunchPlan, isX11Copy } = require('./linux-x11');
+const { MEDIA_KEY_ACTIONS, mediaKeyAction, claimWanted, createMediaKeyClaims } = require('./media-keys');
+const { createVoiceOverlay } = require('./voice-overlay');
+const { onSomeDisplay, usableBounds, centeredIn } = require('./window-placement');
+const { sanitizeVoiceReport, createVoiceReports } = require('./voice-overlay-state');
+const appActivity = require('./app-activity');
+// Set while this copy quits to make way for its X11 copy, and when an X11
+// start failed and this copy opens normally instead (Haven #5741).
+let exitingForX11 = false;
+let x11StartFailed = false;
+const { createServerCheckHosts, isLocalScreenFrame } = require('./server-check');
+const {
+  normalizeServerUrl, sanitizeServerHistory,
+  readServerList, writeServerList, markConnected, setOrder, serverListView,
+} = require('./server-list');
+const {
+  planPageRequest, applyPageRequest, promptText, createRequestGate,
+} = require('./server-list-gate');
+
+function isWaylandSession(platform = process.platform, env = process.env) {
+  if (platform !== 'linux') return false;
+  const sessionType = String(env?.XDG_SESSION_TYPE || '').toLowerCase();
+  if (sessionType === 'wayland') return true;
+  if (sessionType === 'x11') return false;
+  return Boolean(env?.WAYLAND_DISPLAY);
+}
+
+// ── Auto-Updater (electron-updater) ───────────────────────
+let autoUpdater;
+try { ({ autoUpdater } = require('electron-updater')); }
+catch (err) { console.warn('[AutoUpdate] electron-updater could not be loaded, update checks are off:', err.message); }
+let _manualUpdateCheck = false; // set by Help > Check for Updates (Haven #5627)
+const { createUpdateState, CHECK_INTERVAL_MS: UPDATE_CHECK_INTERVAL_MS } = require('./update-state');
+const devShortcut = require('./dev-shortcut');
+const updateState = createUpdateState();
+
+// ── Constants ─────────────────────────────────────────────
+
+const IS_DEV    = process.argv.includes('--dev');
+const SHOW_SERVER  = process.argv.includes('--show-server');
+const START_HIDDEN = process.argv.includes('--hidden');
+const ICON_PATH = path.join(__dirname, '..', '..', 'assets', 'icon.png');
+
+// ── Persistent Store ──────────────────────────────────────
+const store = new Store({
+  defaults: {
+    userPrefs: {
+      mode: null,             // 'host' | 'join'
+      serverUrl: null,        // last-connected server URL
+      serverPath: null,       // path to Haven server dir (for hosting)
+      skipWelcome: false,     // remember choice
+      audioInput:  null,      // preferred mic device ID
+      audioOutput: null,      // preferred speaker device ID
+    },
+    windowBounds: { width: 1200, height: 800 },
+    desktopShortcuts: {
+      mute:   'CommandOrControl+Shift+M',  // toggle mute
+      deafen: 'CommandOrControl+Shift+D',  // toggle deafen
+      ptt:    '',                           // push-to-talk (empty = disabled)
+      ptm:    '',                           // push-to-mute, held (empty = disabled)
+    },
+    startOnLogin:   false,    // launch Haven Desktop on OS login
+    startHidden:    false,    // start minimized to tray (when startOnLogin is enabled)
+    minimizeToTray: false,    // close button hides to tray instead of quitting
+    flashTaskbar:   true,     // flash the taskbar button for a notification while in the background
+    forceSDR:       false,    // force sRGB color profile (fixes HDR over-saturation)
+    hideMenuBar:    false,    // hide the File/Edit/View/Window/Help menu bar
+    disableGpuVsync:   false, // disable GPU vsync (workaround for G-Sync/VRR 5 FPS bug, #35)
+    unlimitFrameRate:  false, // disable Chromium's frame-rate cap (pairs with disableGpuVsync)
+    linuxVaapiBypass:  false, // skip Chromium's VA-API driver blocklist on Linux (off by default)
+    linuxForceX11:     false, // run through X11 (XWayland) instead of native Wayland (Haven #5721)
+    videoEncoderPreference: 'hardware', // preferred WebRTC screen-share encoder
+    screenShareAudioMode: 'window', // share picker audio: 'window' | 'system' | 'none' (#5760)
+    serverMutes: {},          // server origin → 'all' | 'mentions' (server mute, set from any server's icon)
+    appActivityServers: [],   // server origins the user lets see activity from other apps (Haven #5894)
+    serverHistory:  [],       // [{url, name, lastConnected}] of recent server connections
+    serverListRemoved: [],    // servers the user removed; pages may not add them back
+    serverListOrder:   [],    // the user's server rail order, shared by every server
+    language: SYSTEM_LANGUAGE,
+    languagePreferenceSet: false,
+  },
+});
+
+const storedLanguage = store.get('language');
+if (storedLanguage === 'system') store.set('language', SYSTEM_LANGUAGE);
+if (storedLanguage && storedLanguage !== SYSTEM_LANGUAGE && storedLanguage !== 'system') {
+  store.set('languagePreferenceSet', true);
+}
+if (storedLanguage && storedLanguage !== SYSTEM_LANGUAGE && storedLanguage !== 'system') {
+  app.commandLine.appendSwitch('lang', resolveLocale(storedLanguage));
+}
+
+// ── Enable native Wayland and video encoding (must be before app.whenReady) ──
+const enabledFeatures = [
+  'PlatformHEVCEncoderSupport',
+  'WebRtcAllowH265Send',
+  'WebRtcAV1HWEncode',
+];
+if (process.platform === 'linux') {
+  enabledFeatures.push('UseOzonePlatform', 'WaylandWindowDecorations');
+  // The VA-API bypass flags below skip Chromium's driver blocklist for both
+  // encode AND decode, so they stay off by default and are opt-in via the
+  // Desktop setting (linuxVaapiBypass). Enabling them can unlock hardware
+  // encoding on drivers Chromium would otherwise reject, at the cost of
+  // bypassing upstream stability checks.
+  if (store.get('linuxVaapiBypass') === true) {
+    enabledFeatures.push(
+      'AcceleratedVideoEncoder',
+      'VaapiOnNvidiaGPUs',
+      'VaapiIgnoreDriverChecks'
+    );
+  }
+  app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
+  // X11 mode (Haven #5721, #5741): start an X11 copy and quit, since a switch
+  // set from here comes too late. See linux-x11.js.
+  const x11Plan = x11LaunchPlan({
+    platform: process.platform,
+    enabled: store.get('linuxForceX11'),
+    argv: process.argv,
+    env: process.env,
+    execPath: process.execPath,
+    pending: store.get('linuxX11Pending'),
+  });
+  if (x11Plan.action === 'give-up') {
+    // The last X11 start never came up: open normally and say so once ready.
+    store.set('linuxForceX11', false);
+    store.delete('linuxX11Pending');
+    x11StartFailed = true;
+  } else if (x11Plan.action === 'start-x11') {
+    store.set('linuxX11Pending', Date.now());
+    try {
+      require('child_process').spawn(x11Plan.command, x11Plan.args, { detached: true, stdio: 'ignore' }).unref();
+      exitingForX11 = true;
+      app.exit(0);
+    } catch (err) {
+      console.warn('[X11] could not start in X11 mode, opening normally:', err.message);
+      store.set('linuxForceX11', false);
+      store.delete('linuxX11Pending');
+      x11StartFailed = true;
+    }
+  }
+}
+app.commandLine.appendSwitch('enable-features', enabledFeatures.join(','));
+
+// The last X11 start is known to have worked (or no longer matters), so the
+// next launch tries X11 mode again instead of turning it off. A start that
+// never comes up never gets here, and the next launch still finds it.
+function clearX11Pending() {
+  if (store.get('linuxX11Pending') !== undefined) store.delete('linuxX11Pending');
+}
+
+let currentLocale = 'en';
+
+function getSystemLanguages() {
+  try {
+    return [...app.getPreferredSystemLanguages(), app.getLocale()];
+  } catch {
+    return [];
+  }
+}
+
+function refreshLocale() {
+  currentLocale = resolveLocale(store.get('language'), getSystemLanguages());
+  return currentLocale;
+}
+
+function t(key, values) {
+  return translate(currentLocale, key, values);
+}
+
+function getI18nState() {
+  const preference = store.get('language') || SYSTEM_LANGUAGE;
+  const metadata = getLocaleMetadata(currentLocale);
+  const systemLocale = resolveLocale(SYSTEM_LANGUAGE, getSystemLanguages());
+  return {
+    preference,
+    locale: currentLocale,
+    systemLocale,
+    isPreferenceStored: !!store.get('languagePreferenceSet'),
+    direction: metadata.direction,
+    supportedLocales: SUPPORTED_LOCALES,
+  };
+}
+
+function broadcastLanguageChange() {
+  const state = getI18nState();
+  const targets = new Set([
+    welcomeWindow?.webContents,
+    mainWindow?.webContents,
+    ...Array.from(serverViews.values(), view => view.webContents),
+  ]);
+  for (const contents of targets) safeSend(contents, 'i18n:changed', state);
+}
+
+function refreshLanguageSurfaces() {
+  Menu.setApplicationMenu(buildAppMenu());
+  rebuildTrayMenu();
+  voiceOverlay?.languageChanged();
+  broadcastLanguageChange();
+  recomputeTaskbarBadge();
+}
+
+function applyAutomaticServerLocale(locale) {
+  if ((store.get('language') || SYSTEM_LANGUAGE) !== SYSTEM_LANGUAGE) return;
+  const resolved = normalizeLocale(locale) || DEFAULT_LOCALE;
+  if (resolved === currentLocale) return;
+  currentLocale = resolved;
+  if (app.isReady()) refreshLanguageSurfaces();
+}
+
+function setLanguagePreference(preference) {
+  if (preference === 'system') preference = SYSTEM_LANGUAGE;
+  const isSupported = preference === SYSTEM_LANGUAGE
+    || SUPPORTED_LOCALES.some(({ code }) => code === preference);
+  if (!isSupported) return getI18nState();
+
+  const currentPreference = store.get('language') || SYSTEM_LANGUAGE;
+  if (currentPreference === preference && store.get('languagePreferenceSet')) {
+    return getI18nState();
+  }
+
+  store.set('language', preference);
+  store.set('languagePreferenceSet', true);
+  refreshLocale();
+  if (app.isReady()) {
+    refreshLanguageSurfaces();
+    const activeView = activeServerUrl ? serverViews.get(activeServerUrl) : null;
+    safeSend(activeView?.webContents, 'i18n:sync-server-preference', getI18nState());
+  }
+  return getI18nState();
+}
+
+// ── Display color workarounds (must be before app.whenReady) ──
+applyDisplayColorWorkarounds(app.commandLine, process.platform, store.get('forceSDR'));
+
+// ── G-Sync / VRR workaround (#35): Chromium can negotiate a tiny refresh rate
+// with an Nvidia G-Sync display and then never renegotiate back up, dropping
+// the renderer to ~5 FPS once the window has been hidden/restored. Disabling
+// GPU vsync and Chromium's internal frame-rate limit forces the compositor to
+// keep producing frames at full speed. Both flags can introduce visible tearing
+// on non-VRR monitors, which is why they're off by default and opt-in via the
+// Debug section of Settings.
+if (store.get('disableGpuVsync')) {
+  app.commandLine.appendSwitch('disable-gpu-vsync');
+}
+if (store.get('unlimitFrameRate')) {
+  app.commandLine.appendSwitch('disable-frame-rate-limit');
+}
+
+// NOTE: there is exactly ONE --disable-features switch below. Chromium keeps
+// only the last occurrence of a switch, so appending it a second time
+// somewhere else silently throws away everything in the first one.
+
+// ── Windows app identity ────────────────────────────────────
+// Without an explicit AppUserModelID, Windows files a copy run from source
+// under electron.exe and shows Electron's logo on the taskbar instead of the
+// window's Haven icon. The id matches electron-builder's appId, which is what
+// the installer's shortcuts carry, so an installed copy keeps one taskbar
+// entry and its notifications keep their name.
+if (process.platform === 'win32') {
+  try { app.setAppUserModelId('com.haven.desktop'); } catch {}
+  // A copy run from source uses one fixed toast CLSID, the one its Start
+  // Menu shortcut carries (see dev-shortcut.js), instead of a random one per
+  // run, so the shortcut and Electron always agree.
+  if (!app.isPackaged) {
+    try { app.setToastActivatorCLSID(devShortcut.DEV_TOAST_CLSID); }
+    catch (err) { console.warn('[Haven] could not set the toast CLSID:', err.message); }
+  }
+}
+
+// ── Suppress Chromium stderr noise (WGC ProcessFrame spam, GPU errors, etc.) ──
+// disable-logging shuts down Chromium's logging system across ALL subprocesses
+// (browser, renderer, GPU).  --log-level only affects the browser process,
+// but the WGC ProcessFrame flood originates from the GPU process.
+app.commandLine.appendSwitch('disable-logging');
+
+// ── Memory management: keep the renderer lean ──────────────
+// The Oilpan OOM crash is in Chromium's C++ DOM-object allocator, which is
+// separate from V8's JS heap.  Raising V8 to 512 MB gives the RGB theme cycle,
+// canvas effects, and message rendering more headroom so the GC fires less
+// frequently (GC pauses were a significant contributor to the progressive
+// slowdown reported as "hover gets slower over 5 minutes").
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512');
+// Reduce GPU process memory usage: Haven doesn't need heavy GPU compositing
+app.commandLine.appendSwitch('disable-gpu-memory-buffer-video-frames');
+// Limit image decode cache (large images/gifs can balloon memory)
+app.commandLine.appendSwitch('image-decode-ct', '3');
+// NOTE: 'disable-renderer-backgrounding' was removed; it prevented Chromium
+// from throttling timers when the window was unfocused, causing all intervals
+// (clock, ping, server polling, voice analysers) to run at full speed 24/7.
+// This contributed to renderer freezes by starving the event loop.
+// #5379: but Chromium *also* treats a window covered by another full-size
+// window as "occluded" and starts throttling the renderer there too, which
+// stalls the WebRTC screen-share encoder and introduces permanent A/V desync
+// for the streamer the moment they alt-tab to a maximized window. Disabling
+// the native-occlusion calculation tells Chromium to keep the renderer awake
+// when the window is merely hidden behind another window (it does NOT cover
+// the explicit-minimize case; that one is still subject to OS-level throttling).
+// Also disable IntensiveWakeUpThrottling (introduced in M87) which clamps
+// timers to 1Hz after the page is hidden for >5 minutes, catastrophic for
+// a long-running screen share if the OS ever flips the window to hidden.
+// AutofillServerCommunication is folded in here too: it suppresses the noisy
+// Chrome Autofill CDP warnings on startup, and used to be its own
+// appendSwitch('disable-features', ...) call further up, which this line was
+// quietly overwriting.
+app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication,CalculateNativeWinOcclusion,IntensiveWakeUpThrottling');
+// #5379 (follow-up): the CalculateNativeWinOcclusion flag only stops
+// Chromium from *calculating* occlusion itself. Windows' own DWM still
+// signals occlusion when another window is snap-maximized over Haven, and
+// the GPU/renderer process throttles independently of the calculation
+// flag. This switch tells Chromium to ignore that OS-level occlusion
+// signal entirely, which is exactly the case the Snap workflow hits.
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+// Cap the GPU-process memory budget so decoded textures don't eat into
+// the reservation Oilpan needs for large DOM allocations.
+app.commandLine.appendSwitch('force-gpu-mem-available-mb', '256');
+
+// ── State ─────────────────────────────────────────────────
+let mainWindow      = null;
+let welcomeWindow   = null;
+// Whether Haven last asked for the welcome window to be shown. Linux window
+// managers show a window a moment after show() returns, so isVisible() can
+// still say false right after it; the app window's close handler reads this
+// instead (#5715).
+let welcomeWanted   = false;
+let tray            = null;
+let trayIconPlain   = null;
+let trayIconUnread  = null;
+let trayUnread      = false;
+let trayRefreshTimer = null;
+let voiceOverlay    = null;   // the in-game voice overlay (voice-overlay.js)
+const voiceReports  = createVoiceReports();
+let serverManager   = null;
+let audioCapture    = null;
+const pipeWireStreamRouter = process.platform === 'linux'
+  ? new PipeWireStreamRouter()
+  : null;
+const audioCaptureController = createAudioCaptureController(() => {
+  try { audioCapture?.stopCapture(); } catch {}
+});
+let screenShareRequestInProgress = false;
+let cancelActiveScreenPicker = null;
+let hardwareVideoEncodingAvailable = false;
+let hardwareVideoEncodingStatus = 'unavailable';
+app.on('gpu-info-update', () => {
+  hardwareVideoEncodingStatus = String(
+    app.getGPUFeatureStatus().video_encode || 'unavailable'
+  );
+  hardwareVideoEncodingAvailable = hardwareVideoEncodingStatus.startsWith('enabled');
+});
+let serverViews     = new Map();  // serverUrl → BrowserView
+let activeServerUrl = null;
+let primaryServerUrl = null;       // the server the user actually chose to connect to
+let badgeIcon       = null;
+let serverBadgeState = new Map();  // serverUrl → boolean (true = has unreads)
+let serverLanguageStates = new Map(); // serverUrl → { preference, locale }
+// `${serverUrl}|${channelCode}` → the live Notification instance currently
+// shown for that channel, so a cross-device read receipt can close it.
+const liveNotificationsByServerAndChannel = new Map();
+// Toasts still on screen (a 'close' event takes one out). The map above also
+// holds toasts that have moved to the Windows Notification Center.
+const onScreenNotifications = new Set();
+// senderUrl → Set<normalizedUrl> of servers that view's sidebar can display.
+// Used to filter the taskbar overlay so a background BrowserView with
+// unreads doesn't light the badge when no open view has a visible icon
+// for that server (orphan / phantom badge). (#5269)
+let knownServerUrlsByView = new Map();
+let _logBuf = '', _logTimer = null;  // server log batch buffer (module-scope so crash handler can clear)
+
+// Build a { normalizedUrl: displayName } map from serverHistory + live views.
+// Used to enrich badge broadcasts so the renderer can label an "orphan
+// unread" fallback icon when a server fires a badge but isn't in the
+// active view's sidebar. (#5337 multiserver unread desync)
+function buildServerNameMap() {
+  const out = {};
+  try {
+    const hist = store.get('serverHistory') || [];
+    for (const entry of hist) {
+      if (!entry || !entry.url) continue;
+      const norm = normalizeServerUrl(entry.url);
+      if (!norm) continue;
+      const name = (entry.name && entry.name !== entry.url) ? entry.name : '';
+      out[norm] = name || (() => { try { return new URL(norm).hostname; } catch { return norm; } })();
+    }
+  } catch {}
+  for (const url of serverViews.keys()) {
+    if (out[url]) continue;
+    try { out[url] = new URL(url).hostname; } catch { out[url] = url; }
+  }
+  return out;
+}
+
+function buildServerAppUrl(serverUrl) {
+  return normalizeServerUrl(serverUrl) + '/app.html';
+}
+
+// ── Single-Instance Lock ──────────────────────────────────
+// A copy quitting for its X11 copy must not take the lock that copy needs.
+const gotLock = exitingForX11 ? false : app.requestSingleInstanceLock();
+if (exitingForX11) {
+  // Quitting; nothing else to set up.
+} else if (!gotLock) {
+  // The lock can fail transiently when the previous instance hasn't fully
+  // released its file handles yet (Windows error 32 / sharing violation).
+  // If this is the first attempt, wait 1.5 s for the old process to finish
+  // exiting, then relaunch automatically so the user isn't forced to click
+  // the icon a second time. If it still fails on the retry, another instance
+  // is genuinely running; focus it and quit.
+  const isRetry = process.argv.includes('--relaunch-retry');
+  if (!isRetry) {
+    setTimeout(() => {
+      // An AppImage starts again from the .AppImage file: app.relaunch()
+      // can lose the copy when the AppImage's mount goes away (#5741).
+      const args = process.argv.slice(1).concat(['--relaunch-retry']);
+      if (process.env.APPIMAGE) {
+        try {
+          require('child_process').spawn(process.env.APPIMAGE, args, { detached: true, stdio: 'ignore' }).unref();
+        } catch (err) {
+          console.warn('[Lock] could not start again from the AppImage:', err.message);
+          app.relaunch({ args });
+        }
+      } else {
+        app.relaunch({ args });
+      }
+      app.exit(0);
+    }, 1500);
+  } else {
+    app.quit();
+    setTimeout(() => process.exit(0), 3000).unref();
+  }
+} else {
+  app.on('second-instance', (_event, argv) => {
+    // Haven launched again while X11 mode is on: the launch marks an X11
+    // start and its X11 copy lands here. This copy running in X11, or that
+    // copy getting this far, shows X11 starts work, so the next launch must
+    // not give up on X11 mode (Haven #5741).
+    if (isX11Copy(process.argv) || isX11Copy(argv)) clearX11Pending();
+    const win = mainWindow || welcomeWindow;
+    // show(): a window closed to the tray is hidden, and focus() alone
+    // leaves it hidden, so launching Haven again looked like nothing happened.
+    if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+// Certificate Trust
+//
+// Haven servers often use a certificate they made themselves. The app used
+// to accept every certificate from every host, so someone on the same
+// network could pose as a remote server. The rules are in cert-trust.js: a
+// certificate the system trusts is fine, this computer stays automatic, a
+// local network host's first certificate is remembered without asking, and
+// any other host's own certificate is accepted once the user trusts it.
+// Either way a different certificate later asks again.
+//
+// setCertificateVerifyProc sees every connection (pages, scripts and the
+// Socket.IO reconnect storms that used to exhaust the renderer when TLS
+// errors piled up). The question is asked while the connection waits, and
+// the answer goes straight to its callback, so the page loads as soon as
+// the certificate is trusted.
+// ═══════════════════════════════════════════════════════════
+
+const _certQuestions = new Map(); // "host|fingerprint" -> Promise<boolean>
+// Hosts the Join screen or server picker is checking right now (#62).
+const _serverChecks = createServerCheckHosts();
+
+// Chromium caches the verify proc's answers, and a question left open for
+// about 30 seconds times the connection out and leaves a refusal in that
+// cache. A certificate trusted after that is still turned away there and
+// lands here instead, so the same rules decide.
+app.on('certificate-error', (event, _webContents, url, _error, certificate, callback) => {
+  let host = '';
+  try { host = normalizeHost(new URL(url).hostname); } catch { /* not a URL */ }
+  const verdict = certDecision(
+    { hostname: host, errorCode: -1, fingerprint: certificate?.fingerprint || '' },
+    { pins: trustedCertificates() }
+  );
+  if (verdict === 'local-first') rememberCertificate(host, certificate?.fingerprint || '');
+  if (verdict === 'local' || verdict === 'local-first' || verdict === 'pinned') {
+    event.preventDefault();
+    callback(true);
+    return;
+  }
+  callback(false);
+});
+
+function trustedCertificates() {
+  return store.get('trustedCertificates') || {};
+}
+
+function rememberCertificate(host, fingerprint) {
+  store.set('trustedCertificates', { ...trustedCertificates(), [host]: fingerprint });
+  const waiting = store.get('certTrustGrandfathered') || [];
+  if (waiting.includes(host)) store.set('certTrustGrandfathered', waiting.filter(h => h !== host));
+}
+
+/** A host the user is opening as a Haven server. Only these are asked about;
+ *  a picture in a message from some other host with its own certificate is
+ *  refused quietly, the way a browser would. */
+function isServerHost(host) {
+  if (_serverChecks.has(host)) return true;
+  const urls = [primaryServerUrl, activeServerUrl, ...serverViews.keys(), store.get('userPrefs.serverUrl'),
+    ...(store.get('serverHistory') || []).map(e => e && e.url)];
+  return urls.some((u) => {
+    try { return normalizeHost(new URL(u).hostname) === host; } catch { return false; }
+  });
+}
+
+/** The open question about the certificate of url's host, or null. */
+function pendingCertAnswer(url) {
+  let host = '';
+  try { host = normalizeHost(new URL(url).hostname); } catch { return null; }
+  for (const [key, answer] of _certQuestions) if (key.startsWith(`${host}|`)) return answer;
+  return null;
+}
+
+/** True while the user is being asked about the certificate of url's host. */
+function certQuestionPending(url) {
+  return !!pendingCertAnswer(url);
+}
+
+function askToTrustCertificate(host, certificate, changed) {
+  const fingerprint = certificate?.fingerprint || '';
+  const key = `${host}|${fingerprint}`;
+  if (_certQuestions.has(key)) return _certQuestions.get(key);
+  const previous = trustedCertificates()[host];
+  const lines = [changed ? t('cert.changedDetail') : t('cert.unknownDetail'), '', t('cert.fingerprint', { value: fingerprint })];
+  if (changed && previous) lines.push(t('cert.previousFingerprint', { value: previous }));
+  if (certificate?.issuerName) lines.push(t('cert.issuer', { value: certificate.issuerName }));
+  if (certificate?.validExpiry) lines.push(t('cert.expires', { value: new Date(certificate.validExpiry * 1000).toLocaleDateString() }));
+  const options = {
+    type: 'warning',
+    title: t('cert.title'),
+    message: changed ? t('cert.changedMessage', { host }) : t('cert.unknownMessage', { host }),
+    detail: lines.join('\n'),
+    buttons: [t('dialog.cancel'), changed ? t('cert.trustNew') : t('cert.trust')],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  const parent = [BrowserWindow.getFocusedWindow(), mainWindow, welcomeWindow].find(w => w && !w.isDestroyed());
+  const answer = (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options))
+    .then(({ response }) => {
+      if (response !== 1) return false;
+      rememberCertificate(host, fingerprint);
+      _serverChecks.markTrusted(host);
+      // A slow answer can outlast the connection, which then gave up and
+      // showed the error page; try that server again now.
+      setTimeout(() => retryAfterTrust(host), 500);
+      return true;
+    })
+    .catch(() => false)
+    .finally(() => _certQuestions.delete(key));
+  _certQuestions.set(key, answer);
+  return answer;
+}
+
+function retryAfterTrust(host) {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const current = mainWindow.webContents.getURL();
+    if (!current.includes('connection-error.html')) return;
+    const failed = new URL(current).searchParams.get('url');
+    if (failed && normalizeHost(new URL(failed).hostname) === host) createAppWindow(failed);
+  } catch { /* nothing to retry */ }
+}
+
+app.on('ready', () => {
+  // Servers the user had already connected to before certificates were
+  // checked are trusted on their next connection, instead of a burst of
+  // questions after the update. After that they are remembered like any
+  // other.
+  if (!store.get('certTrustMigrated')) {
+    const hosts = new Set();
+    const urls = (store.get('serverHistory') || []).map(e => e && e.url);
+    urls.push(store.get('userPrefs.serverUrl'));
+    for (const url of urls) {
+      try {
+        const host = normalizeHost(new URL(url).hostname);
+        if (host && !isLocalHost(host)) hosts.add(host);
+      } catch { /* not a URL */ }
+    }
+    store.set('certTrustGrandfathered', [...hosts]);
+    store.set('certTrustMigrated', true);
+  }
+
+  session.defaultSession.setCertificateVerifyProc((request, callback) => {
+    const host = normalizeHost(request.hostname);
+    const fingerprint = request.certificate?.fingerprint || '';
+    const verdict = certDecision(
+      { hostname: host, errorCode: request.errorCode, fingerprint },
+      { pins: trustedCertificates(), grandfathered: store.get('certTrustGrandfathered') || [] }
+    );
+    if (verdict === 'system') return callback(-3); // Chromium's own verdict
+    if (verdict === 'local' || verdict === 'pinned') return callback(0);
+    if (verdict === 'grandfathered' || verdict === 'local-first') {
+
+      rememberCertificate(host, fingerprint);
+      return callback(0);
+    }
+    if (verdict === 'unknown' && !isServerHost(host)) return callback(-3);
+    askToTrustCertificate(host, request.certificate, verdict === 'changed')
+      .then(ok => callback(ok ? 0 : -2));
+  });
+});
+
+// ═══════════════════════════════════════════════════════════
+// App Lifecycle
+// ═══════════════════════════════════════════════════════════
+
+app.whenReady().then(async () => {
+  // Quitting for the X11 copy (Haven #5741): set nothing up.
+  if (exitingForX11) return;
+  refreshLocale();
+  // The X11 copy is up. Still running a few seconds later means the start
+  // worked, so the next launch tries X11 again rather than giving up.
+  if (isX11Copy(process.argv) && store.get('linuxX11Pending')) {
+    setTimeout(clearX11Pending, 5000);
+  }
+  if (x11StartFailed) {
+    setTimeout(() => {
+      const parent = mainWindow || welcomeWindow || undefined;
+      const opts = { type: 'info', title: t('linux.x11FailedTitle'), message: t('linux.x11FailedTitle'), detail: t('linux.x11FailedMessage') };
+      (parent ? dialog.showMessageBox(parent, opts) : dialog.showMessageBox(opts))
+        .catch(err => console.warn('[X11] could not show the notice:', err.message));
+    }, 3000);
+  }
+  serverManager = new ServerManager(store, { showConsole: SHOW_SERVER || IS_DEV, t });
+  // A monitor unplugged or switched off: a window left on it comes back.
+  screen.on('display-removed', () => {
+    const win = mainWindow || welcomeWindow;
+    if (win && !win.isDestroyed() && !onSomeDisplay(win.getBounds(), screen.getAllDisplays())) bringWindowToMainScreen();
+  });
+  voiceOverlay = createVoiceOverlay({
+    electron: { BrowserWindow, ipcMain, screen },
+    store,
+    t,
+    onChange: () => {
+      rebuildTrayMenu();
+      for (const [, view] of serverViews) safeSend(view.webContents, 'voice-overlay:enabled', voiceOverlay.enabled);
+    },
+  });
+  audioCapture  = new AudioCaptureManager(null, () => pipeWireStreamRouter?.stop(), t);
+  badgeIcon     = createBadgeIcon();
+
+  // ── Sync start-on-login with OS ──────────────────────
+  const loginEnabled = !!store.get('startOnLogin');
+  const hiddenArg    = store.get('startHidden') ? ['--hidden'] : [];
+  app.setLoginItemSettings({
+    openAtLogin: loginEnabled,
+    args: loginEnabled ? hiddenArg : [],
+  });
+
+  // ── Auto-update check (issue #3) ──────────────────────
+  // The answer is kept in updateState and sent to every open page; a page
+  // that loads later asks for it (update:state), so the banner no longer
+  // depends on the server page having loaded before GitHub answered (#63).
+  if (autoUpdater) {
+    autoUpdater.autoDownload = false;
+    autoUpdater.on('update-available', (info) => {
+      const asked = _manualUpdateCheck;
+      _manualUpdateCheck = false;
+      if (updateState.available(info.version, asked)) {
+        sendToUpdatePages('update:available', { version: info.version });
+      } else if (asked && updateState.forPage()?.status === 'downloaded') {
+        sendToUpdatePages('update:downloaded');
+      }
+    });
+    // The start-up check stays quiet when nothing is new; a check the user
+    // asked for from the menu says so. (Haven #5627)
+    autoUpdater.on('update-not-available', () => {
+      if (!_manualUpdateCheck) return;
+      _manualUpdateCheck = false;
+      showUpdateBox('info', t('update.upToDate', { version: app.getVersion() }));
+    });
+    autoUpdater.on('download-progress', (progress) => {
+      sendToUpdatePages('update:download-progress', { percent: Math.round(progress.percent) });
+    });
+    autoUpdater.on('update-downloaded', () => {
+      updateState.downloaded();
+      sendToUpdatePages('update:downloaded');
+    });
+    autoUpdater.on('error', (err) => {
+      console.error('[AutoUpdate] Error:', err.message);
+      // Only a download in progress has a banner waiting on the result; a
+      // background check that fails (offline, say) stays in the log.
+      if (updateState.isDownloading()) sendToUpdatePages('update:error', { message: err.message });
+      if (_manualUpdateCheck) {
+        _manualUpdateCheck = false;
+        showUpdateBox('error', t('update.error', { error: err.message }));
+      }
+    });
+    runBackgroundUpdateCheck();
+    // People leave Haven running in the tray for days, so a check made only
+    // at launch can miss a release for a long time (#63).
+    if (app.isPackaged) setInterval(runBackgroundUpdateCheck, UPDATE_CHECK_INTERVAL_MS);
+  }
+
+  // ── Linux desktop integration (issue #3) ──────────────
+  if (process.platform === 'linux') installLinuxDesktopEntry();
+
+  // Forward server log lines to whichever renderer window is active.
+  // Batched to 50 ms to avoid overwhelming the renderer with rapid IPC sends
+  // during server startup / reconnect bursts.
+  serverManager.onLog((msg) => {
+    _logBuf += msg;
+    if (_logTimer) return;
+    _logTimer = setTimeout(() => {
+      const batch = _logBuf;
+      _logBuf = ''; _logTimer = null;
+      safeSend(getActiveContents() || welcomeWindow?.webContents, 'server:log', batch);
+    }, 50);
+  });
+
+  // Permissions are granted without asking, but only to a server page, its
+  // popups and the app's own screens, and only what each needs (rules in
+  // ipc-policy.js): the microphone and camera go to the server on screen
+  // alone, so a hidden background server can never listen in. Not
+  // clipboard-read: Haven never reads the clipboard, and granting it let any
+  // server read whatever was copied, passwords included, without asking.
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+    const requester = permissionRequester(contents);
+    const requestingOrigin = getHttpOrigin(details?.requestingUrl) || getHttpOrigin(details?.securityOrigin);
+    const allowed = permissionAllowed({ permission, requester, requestingOrigin });
+    // A server page given the mic while shown keeps it when hidden (a call
+    // goes on while the user looks at another server).
+    if (allowed && permission === 'media' && requester?.kind === 'server' && requester.active) {
+      mediaGrantOrigins.set(contents, requestingOrigin);
+    }
+    callback(allowed);
+  });
+  // Chromium checks some permissions with no origin at all (media, while a
+  // page loads); those are the page's own, so its address stands in.
+  session.defaultSession.setPermissionCheckHandler((contents, permission, requestingOrigin, details) => {
+    const requester = permissionRequester(contents);
+    return permissionAllowed({
+      permission,
+      requester,
+      requestingOrigin: getHttpOrigin(requestingOrigin) || getHttpOrigin(details?.requestingUrl)
+        || (requester ? getHttpOrigin(contents.getURL()) : null),
+    });
+  });
+
+
+  registerIPC();
+  registerScreenShareHandler();
+  registerVoiceShortcuts();
+
+  const prefs = store.get('userPrefs');
+
+  if (prefs.skipWelcome && prefs.mode && prefs.serverUrl) {
+    // Returning user: remembered preferences
+    if (prefs.mode === 'host' && prefs.serverPath) {
+      const res = await serverManager.startServer(prefs.serverPath);
+      if (!res.success) { createWelcomeWindow(); createTray(); return; }
+      console.log(`[Haven Desktop] Server started at ${res.url} (port ${res.port})`);
+      // Use the fresh URL (protocol may have changed between http/https)
+      createAppWindow(res.url || prefs.serverUrl);
+    } else {
+      createAppWindow(prefs.serverUrl);
+    }
+  } else {
+    createWelcomeWindow();
+  }
+
+  createTray();
+  Menu.setApplicationMenu(buildAppMenu());
+
+});
+
+// ── Voice / PTT global shortcuts ───────────────────────
+//
+// Two layers of registration:
+//
+//   1. Electron's built-in `globalShortcut` for ordinary accelerators
+//      ("F12", "CommandOrControl+Shift+M", "Alt+Q"…). Cheap, no native
+//      dep needed, works everywhere.
+//
+//   2. `uiohook-napi` (optional dependency) for the bindings Electron
+//      can't represent: lone modifiers ("Shift", "Alt", "Control",
+//      "CommandOrControl") and extra mouse buttons ("Mouse4" / "Mouse5"
+//      from #5255). These are the bindings the renderer's recorder
+//      can capture but globalShortcut.register() rejects with "Failed
+//      to register shortcut".  uiohook hooks the OS-level input event
+//      stream so the bindings work even when Haven isn't focused.
+//
+// PTT also gets press/release semantics in hold mode: the renderer
+// listens for `voice:ptt-down` / `voice:ptt-up` and unmutes on down,
+// re-mutes on up. Toggle mode keeps the existing `voice:ptt-toggle`
+// behaviour (single tap flips the mute button state). (#184)
+// Push to mute is always held, the other way round: `voice:ptm-down` mutes
+// and `voice:ptm-up` puts the mic back as it was.
+let _uiohook = null;
+let _uiohookStarted = false;
+// Platform-specific hint for "the native dep didn't load", surfaced in the
+// console so users (especially on Linux where libuiohook is a separate system
+// package) don't have to guess why bare-modifier / mouse PTT bindings silently
+// no-op. (#184 follow-up)
+function _uiohookInstallHint() {
+  if (process.platform === 'linux') {
+    return 'Linux: install libuiohook from your package manager '
+         + '(Arch: `yay -S libuiohook` + `sudo pacman -S base-devel libxtst libxinerama libxkbcommon-x11 libxt`; '
+         + 'Debian/Ubuntu: `sudo apt install libxtst-dev libxt-dev libxkbcommon-dev`), '
+         + 'then `npm rebuild uiohook-napi` in the Haven-Desktop install dir.';
+  }
+  if (process.platform === 'win32') {
+    return 'Windows: uiohook-napi ships a prebuilt binary; if loading fails, '
+         + 'try reinstalling Haven Desktop, or `npm rebuild uiohook-napi` if you built from source.';
+  }
+  if (process.platform === 'darwin') {
+    return 'macOS: grant Haven Accessibility + Input Monitoring permission in System Settings → '
+         + 'Privacy & Security, then restart Haven.';
+  }
+  return '';
+}
+function tryLoadUiohook() {
+  if (_uiohook !== null) return _uiohook;        // already loaded or attempted
+  try {
+    // Loaded lazily so a missing optional dep doesn't break startup.
+    // eslint-disable-next-line global-require
+    _uiohook = require('uiohook-napi');
+  } catch (err) {
+    const hint = _uiohookInstallHint();
+    console.warn('[Shortcuts] uiohook-napi unavailable: bare modifiers and Mouse4/5 PTT bindings will be ignored.');
+    console.warn('[Shortcuts]   reason:', err.message);
+    if (hint) console.warn('[Shortcuts]   hint:', hint);
+    _uiohook = false;
+  }
+  return _uiohook;
+}
+
+// uiohook routing table: { keycode|button -> { kind, event, mode } }
+// kind:  'key' | 'mouse'
+// event: base IPC channel name ('voice:ptt' | 'voice:ptm' | 'voice:mute-toggle' | 'voice:deafen-toggle')
+// mode:  'toggle' (single fire on press) | 'hold' (separate -down / -up events)
+const _uiohookKeyBindings = new Map();
+const _uiohookMouseBindings = new Map();
+// Track which keys/buttons we've already fired -down for so we don't
+// repeat-fire from OS auto-repeat while the key is physically held.
+const _uiohookDownState = new Set();
+
+function _accelToUiohookKeycode(accel) {
+  // uiohook UiohookKey constants: only need the bare-modifier set here.
+  if (!_uiohook) return null;
+  const K = _uiohook.UiohookKey || {};
+  const map = {
+    'CommandOrControl': process.platform === 'darwin' ? K.Meta : K.Ctrl,
+    'Control':          K.Ctrl,
+    'Ctrl':             K.Ctrl,
+    'Alt':              K.Alt,
+    'Shift':            K.Shift,
+    'Meta':             K.Meta,
+    'Cmd':              K.Meta,
+    'Super':            K.Meta,
+  };
+  // uiohook reports left/right modifiers as separate keycodes; return
+  // both so we can match either. Stored as a [primary, alt] pair.
+  // uiohook names the right-hand keys *Right. The old *R names did not
+  // exist, so the right-hand modifier never counted as the binding.
+  const altMap = {
+    'Ctrl':             K.CtrlRight,
+    'Control':          K.CtrlRight,
+    'CommandOrControl': process.platform === 'darwin' ? K.MetaRight : K.CtrlRight,
+    'Alt':              K.AltRight,
+    'Shift':            K.ShiftRight,
+    'Meta':             K.MetaRight,
+    'Cmd':              K.MetaRight,
+    'Super':            K.MetaRight,
+  };
+  const primary = map[accel];
+  if (primary == null) return null;
+  return [primary, altMap[accel]].filter(v => v != null);
+}
+
+// Electron accelerator -> uiohook keycode plus the modifiers that must be
+// down, for a hold-mode PTT on an ordinary key. Bare modifiers and mouse
+// buttons keep their own path above; this covers "V", "F9", "Ctrl+Space",
+// "Shift+Alt+num0" and the like. Returns null for anything uiohook has no
+// code for, so the caller can fall back to globalShortcut. (#5603)
+const _UIOHOOK_KEY_NAMES = {
+  space: 'Space', tab: 'Tab', backspace: 'Backspace', delete: 'Delete', insert: 'Insert',
+  home: 'Home', end: 'End', pageup: 'PageUp', pagedown: 'PageDown',
+  up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight',
+  return: 'Enter', enter: 'Enter', esc: 'Escape', escape: 'Escape',
+  capslock: 'CapsLock', numlock: 'NumLock', scrolllock: 'ScrollLock', printscreen: 'PrintScreen',
+  plus: 'Equal', numadd: 'NumpadAdd', numsub: 'NumpadSubtract', nummult: 'NumpadMultiply',
+  numdiv: 'NumpadDivide', numdec: 'NumpadDecimal', numenter: 'NumpadEnter',
+  '`': 'Backquote', '-': 'Minus', '=': 'Equal', '[': 'BracketLeft', ']': 'BracketRight',
+  '\\': 'Backslash', ';': 'Semicolon', "'": 'Quote', ',': 'Comma', '.': 'Period', '/': 'Slash',
+};
+function _accelToUiohookCombo(accel) {
+  const u = tryLoadUiohook();
+  if (!u) return null;
+  const K = u.UiohookKey || {};
+  const parts = String(accel || '').split('+').map(p => p.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  const key = parts.pop();
+  const mods = { ctrl: false, alt: false, shift: false, meta: false };
+  for (const m of parts) {
+    switch (m) {
+      case 'CommandOrControl': case 'CmdOrCtrl':
+        if (process.platform === 'darwin') mods.meta = true; else mods.ctrl = true; break;
+      case 'Control': case 'Ctrl': mods.ctrl = true; break;
+      case 'Alt': case 'Option': mods.alt = true; break;
+      case 'Shift': mods.shift = true; break;
+      case 'Meta': case 'Cmd': case 'Command': case 'Super': mods.meta = true; break;
+      default: return null;
+    }
+  }
+  let name = null;
+  if (/^[a-z]$/i.test(key)) name = key.toUpperCase();
+  else if (/^[0-9]$/.test(key)) name = key;
+  else if (/^F([1-9]|1[0-9]|2[0-4])$/i.test(key)) name = 'F' + key.slice(1);
+  else if (/^num[0-9]$/i.test(key)) name = 'Numpad' + key.slice(3);
+  else name = _UIOHOOK_KEY_NAMES[key.toLowerCase()] || _UIOHOOK_KEY_NAMES[key] || null;
+  const code = name != null ? K[name] : undefined;
+  if (typeof code !== 'number') return null;
+  return { keycodes: [code], mods };
+}
+
+// Every modifier the binding names has to be down. Extra ones are fine, so
+// a plain V still opens the mic while Shift is held for sprinting in a game.
+function _uiohookModsDown(mods, e) {
+  if (!mods) return true;
+  return (!mods.ctrl || !!e.ctrlKey) && (!mods.alt || !!e.altKey)
+      && (!mods.shift || !!e.shiftKey) && (!mods.meta || !!e.metaKey);
+}
+
+function _accelToMouseButton(accel) {
+  // accel: "Mouse4" / "Mouse5" / etc. (1-indexed, matches the recorder's `button + 1`)
+  const m = /^Mouse(\d+)$/i.exec(accel || '');
+  if (!m) return null;
+  return parseInt(m[1], 10);
+}
+
+// Held shortcuts that went through Electron's globalShortcut, which has no
+// key-up: event -> the timer that sends the release once the repeats stop.
+const _gsHoldTimers = new Map();
+
+function _isUiohookAccel(accel) {
+  if (!accel) return false;
+  if (/^Mouse\d+$/i.test(accel)) return true;
+  if (['Shift', 'Alt', 'Control', 'Ctrl', 'CommandOrControl', 'Meta', 'Cmd', 'Super'].includes(accel)) return true;
+  return false;
+}
+
+function _ensureUiohookStarted() {
+  const u = tryLoadUiohook();
+  if (!u || _uiohookStarted) return !!u;
+
+  u.uIOhook.on('keydown', (e) => {
+    for (const [, binding] of _uiohookKeyBindings) {
+      if (!binding.keycodes.includes(e.keycode)) continue;
+      if (!_uiohookModsDown(binding.mods, e)) continue;
+      const stateKey = `k:${binding.event}`;
+      if (binding.mode === 'hold') {
+        if (_uiohookDownState.has(stateKey)) continue; // ignore OS auto-repeat
+        _uiohookDownState.add(stateKey);
+        safeSend(getActiveContents(), `${binding.event}-down`);
+      } else {
+        // A toggle fires once per press: holding the key a moment must not
+        // flip it again on every OS auto-repeat (Haven #5724).
+        if (_uiohookDownState.has(stateKey)) continue;
+        _uiohookDownState.add(stateKey);
+        // The preload listens for voice:ptt-toggle, the same name the
+        // shortcut API path sends; the bare event name went nowhere.
+        safeSend(getActiveContents(), binding.event === 'voice:ptt' ? 'voice:ptt-toggle' : binding.event);
+      }
+    }
+  });
+  u.uIOhook.on('keyup', (e) => {
+    for (const [, binding] of _uiohookKeyBindings) {
+      if (!binding.keycodes.includes(e.keycode)) continue;
+      const stateKey = `k:${binding.event}`;
+      _uiohookDownState.delete(stateKey);
+      if (binding.mode === 'hold') {
+        safeSend(getActiveContents(), `${binding.event}-up`);
+      }
+    }
+  });
+  u.uIOhook.on('mousedown', (e) => {
+    for (const [, binding] of _uiohookMouseBindings) {
+      if (e.button !== binding.button) continue;
+      const stateKey = `m:${binding.event}`;
+      if (binding.mode === 'hold') {
+        if (_uiohookDownState.has(stateKey)) continue;
+        _uiohookDownState.add(stateKey);
+        safeSend(getActiveContents(), `${binding.event}-down`);
+      } else {
+        safeSend(getActiveContents(), binding.event === 'voice:ptt' ? 'voice:ptt-toggle' : binding.event);
+      }
+    }
+  });
+  u.uIOhook.on('mouseup', (e) => {
+    for (const [, binding] of _uiohookMouseBindings) {
+      if (e.button !== binding.button) continue;
+      const stateKey = `m:${binding.event}`;
+      _uiohookDownState.delete(stateKey);
+      if (binding.mode === 'hold') {
+        safeSend(getActiveContents(), `${binding.event}-up`);
+      }
+    }
+  });
+
+  try {
+    u.uIOhook.start();
+    _uiohookStarted = true;
+    console.log('[Shortcuts] uiohook-napi started: bare modifiers + Mouse4/5 active');
+  } catch (err) {
+    console.warn('[Shortcuts] uiohook-napi failed to start:', err.message);
+    const hint = _uiohookInstallHint();
+    if (hint) console.warn('[Shortcuts]   hint:', hint);
+    return false;
+  }
+  return true;
+}
+
+function _stopUiohookIfIdle() {
+  if (!_uiohookStarted) return;
+  if (_uiohookKeyBindings.size === 0 && _uiohookMouseBindings.size === 0) {
+    try {
+      _uiohook && _uiohook.uIOhook.stop();
+    } catch {}
+    _uiohookStarted = false;
+    _uiohookDownState.clear();
+  }
+}
+
+function unregisterVoiceShortcuts() {
+  // The voice shortcuts are registered first, so a voice shortcut on a media
+  // key keeps it; registerVoiceShortcuts takes the free ones back after.
+  releaseMediaKeys();
+  const cfg = store.get('desktopShortcuts') || {};
+  ['mute', 'deafen', 'ptt', 'ptm'].forEach(k => {
+    try { if (cfg[k] && !_isUiohookAccel(cfg[k])) globalShortcut.unregister(cfg[k]); } catch {}
+  });
+  for (const timer of _gsHoldTimers.values()) clearTimeout(timer);
+  _gsHoldTimers.clear();
+  _uiohookKeyBindings.clear();
+  _uiohookMouseBindings.clear();
+  _uiohookDownState.clear();
+  _stopUiohookIfIdle();
+}
+
+function registerVoiceShortcuts() {
+  unregisterVoiceShortcuts();
+  const cfg = store.get('desktopShortcuts') || {};
+  const pttMode = cfg.pttMode === 'toggle' ? 'toggle' : 'hold'; // default hold (#5255)
+
+  const bindings = [
+    { name: 'mute',   accel: cfg.mute,   event: 'voice:mute-toggle',   mode: 'toggle' },
+    { name: 'deafen', accel: cfg.deafen, event: 'voice:deafen-toggle', mode: 'toggle' },
+    { name: 'ptt',    accel: cfg.ptt,    event: 'voice:ptt',           mode: pttMode  },
+    // Push to mute: muted while held, back as it was on release.
+    { name: 'ptm',    accel: cfg.ptm,    event: 'voice:ptm',           mode: 'hold'   },
+  ];
+
+  let needUiohook = false;
+
+  for (const b of bindings) {
+    if (!b.accel) continue;
+
+    // A key that types (V, M, Space) is never taken from other apps. Push to
+    // talk or push to mute held on one still works through the input hook,
+    // which only listens; a toggle on such a key would flip whenever the user
+    // typed it.
+    const typingKey = isTypingKeyAccelerator(b.accel);
+    if (typingKey && !isHoldShortcut(b.name, cfg)) {
+      console.warn(`[Shortcuts] ${b.accel} types text, so it is not used for ${b.event}`);
+      continue;
+    }
+
+    // Hold mode on an ordinary key or combo. Electron's globalShortcut has no
+    // key-up, so a held V or Ctrl+Space could only ever toggle. With the input
+    // hook available the binding goes through it instead, which gives a real
+    // press and release. Anything it cannot map falls through to the
+    // toggle-only path below. (#5603)
+    if (b.mode === 'hold' && !_isUiohookAccel(b.accel) && tryLoadUiohook()) {
+      const combo = _accelToUiohookCombo(b.accel);
+      if (combo) {
+        needUiohook = true;
+        _uiohookKeyBindings.set(b.accel + '|' + b.event, {
+          keycodes: combo.keycodes,
+          mods:     combo.mods,
+          event:    b.event,
+          mode:     b.mode,
+        });
+        continue;
+      }
+    }
+
+    if (_isUiohookAccel(b.accel)) {
+      needUiohook = true;
+      const mouseBtn = _accelToMouseButton(b.accel);
+      if (mouseBtn != null) {
+        _uiohookMouseBindings.set(b.accel + '|' + b.event, {
+          button: mouseBtn,
+          event:  b.event,
+          mode:   b.mode,
+        });
+      } else {
+        const keycodes = _accelToUiohookKeycode(b.accel);
+        if (keycodes && keycodes.length) {
+          _uiohookKeyBindings.set(b.accel + '|' + b.event, {
+            keycodes,
+            event: b.event,
+            mode:  b.mode,
+          });
+        }
+      }
+      continue;
+    }
+
+    if (typingKey) {
+      console.warn(`[Shortcuts] ${b.accel} needs the input hook for ${b.event} held; it is not taken as a global shortcut`);
+      continue;
+    }
+
+    // Ordinary accelerator through Electron globalShortcut. It has no key-up
+    // and re-fires on OS auto-repeat, so a hold-mode PTT that lands here (the
+    // input hook unavailable, or a key it could not map) used to toggle mute
+    // on every repeat while the key was held (Dispencer2, NumLock on Windows).
+    // Hold is emulated instead: talk on the first press, release 350 ms after
+    // the repeats stop.
+    const fire = () => {
+      if (b.mode === 'hold') {
+        const stateKey = `g:${b.event}`;
+        if (!_uiohookDownState.has(stateKey)) {
+          _uiohookDownState.add(stateKey);
+          safeSend(getActiveContents(), `${b.event}-down`);
+        }
+        clearTimeout(_gsHoldTimers.get(b.event));
+        _gsHoldTimers.set(b.event, setTimeout(() => {
+          _gsHoldTimers.delete(b.event);
+          _uiohookDownState.delete(stateKey);
+          safeSend(getActiveContents(), `${b.event}-up`);
+        }, 350));
+        return;
+      }
+      safeSend(getActiveContents(), b.event === 'voice:ptt' ? 'voice:ptt-toggle' : b.event);
+    };
+    let registered = false;
+    try {
+      registered = !!globalShortcut.register(b.accel, fire);
+    } catch (e) {
+      console.warn(`[Shortcuts] Failed to register ${b.accel}:`, e.message);
+    }
+    if (registered) continue;
+
+    // Electron will not take some keys on their own as a global shortcut
+    // (Tab, Caps Lock, the backtick key on some layouts). The input hook
+    // can, in either mode, so a binding Electron refused goes through it
+    // when it is available. (#38)
+    const combo = tryLoadUiohook() ? _accelToUiohookCombo(b.accel) : null;
+    if (combo) {
+      needUiohook = true;
+      _uiohookKeyBindings.set(b.accel + '|' + b.event, {
+        keycodes: combo.keycodes,
+        mods:     combo.mods,
+        event:    b.event,
+        mode:     b.mode,
+      });
+    } else {
+      console.warn(`[Shortcuts] Could not register ${b.accel} through Electron or the input hook`);
+    }
+  }
+
+  if (needUiohook) _ensureUiohookStarted();
+  refreshMediaKeys();
+}
+
+// ── Listen Together media keys ──────────────────────────
+// Play/pause, next and previous run the shared music player while a server
+// page asks for them: its player is playing (or paused a moment ago) and
+// the user may control it. Holding a media key takes it from every other
+// app, so the keys are let go as soon as no page asks. See media-keys.js.
+const mediaKeyClaims = createMediaKeyClaims();
+const _mediaKeysHeld = new Set();
+const _mediaKeyPages = new WeakSet();
+
+function _sendMediaKey(accel) {
+  const action = mediaKeyAction(accel);
+  if (!action) return;
+  const active = activeServerUrl && serverViews.get(activeServerUrl);
+  const targetId = mediaKeyClaims.target(active ? active.webContents.id : null);
+  if (targetId == null) return;
+  for (const view of serverViews.values()) {
+    if (view.webContents.id === targetId) { safeSend(view.webContents, 'music:media-key', action); return; }
+  }
+}
+
+function releaseMediaKeys() {
+  for (const accel of _mediaKeysHeld) {
+    try { globalShortcut.unregister(accel); }
+    catch (err) { console.warn(`[MediaKeys] could not let go of ${accel}:`, err.message); }
+  }
+  _mediaKeysHeld.clear();
+}
+
+function refreshMediaKeys() {
+  if (!mediaKeyClaims.wanted()) { releaseMediaKeys(); return; }
+  for (const accel of Object.keys(MEDIA_KEY_ACTIONS)) {
+    // Already ours, or a voice shortcut's.
+    if (_mediaKeysHeld.has(accel) || globalShortcut.isRegistered(accel)) continue;
+    let ok = false;
+    try { ok = !!globalShortcut.register(accel, () => _sendMediaKey(accel)); }
+    catch (err) { console.warn(`[MediaKeys] could not take ${accel}:`, err.message); }
+    if (ok) _mediaKeysHeld.add(accel);
+    else console.warn(`[MediaKeys] ${accel} is held by another app, leaving it there`);
+  }
+}
+
+const _voiceReportPages = new WeakSet();
+
+/** A server page's voice overlay report; the overlay shows the call you are in. */
+function setVoiceReport(contents, report) {
+  const id = contents.id;
+  if (!_voiceReportPages.has(contents)) {
+    _voiceReportPages.add(contents);
+    // A page that goes away, or loads anew, is no longer in a call.
+    const forget = () => { voiceReports.drop(id); refreshVoiceOverlay(); };
+    contents.once('destroyed', forget);
+    contents.on('did-navigate', forget);
+  }
+  voiceReports.set(id, report);
+  refreshVoiceOverlay();
+}
+
+function refreshVoiceOverlay() {
+  if (!voiceOverlay) return;
+  const active = activeServerUrl && serverViews.get(activeServerUrl);
+  const shown = voiceReports.shown(active ? active.webContents.id : null);
+  voiceOverlay.update(shown && {
+    key: String(shown.key),
+    channelName: shown.channelName,
+    users: shown.users,
+    messages: shown.messages,
+  });
+}
+
+/** A server page's own main frame asks for the media keys, or lets them go. */
+function setMediaKeyClaim(contents, payload) {
+  const id = contents.id;
+  if (!_mediaKeyPages.has(contents)) {
+    _mediaKeyPages.add(contents);
+    // A page that goes away, or loads anew, asks again for itself.
+    const forget = () => { if (mediaKeyClaims.drop(id)) refreshMediaKeys(); };
+    contents.once('destroyed', forget);
+    contents.on('did-navigate', forget);
+  }
+  if (mediaKeyClaims.set(id, claimWanted(payload))) refreshMediaKeys();
+}
+
+// ── Activity from other apps on this computer (Haven #5894) ──
+// See app-activity.js. A server page is handed what is heard only after the
+// user said yes for that server in the app's own dialog, and the listener
+// only runs while such a page is open.
+const _appActivityPages = new Map(); // webContents id -> webContents
+const _appActivityHooked = new WeakSet();
+let _appActivityListener = null;
+let _appActivityAsking = false;
+
+function appActivityServers() {
+  return appActivity.cleanAllowed(store.get('appActivityServers'));
+}
+
+function appActivityAllowed(serverUrl) {
+  const origin = appActivity.serverOrigin(serverUrl);
+  return !!origin && appActivityServers().includes(origin);
+}
+
+function appActivityListener() {
+  if (!_appActivityListener) {
+    _appActivityListener = appActivity.createActivityListener({
+      net: require('net'),
+      fs,
+      platform: process.platform,
+      env: process.env,
+      lookupName: appActivity.createNameLookup({
+        platform: process.platform,
+        env: process.env,
+        execFile: require('child_process').execFile,
+        readFile: fs.promises.readFile,
+      }),
+      onChange: (current) => {
+        for (const contents of _appActivityPages.values()) safeSend(contents, 'app-activity:update', current);
+      },
+      log: (message) => console.log(`[AppActivity] ${message}`),
+    });
+  }
+  return _appActivityListener;
+}
+
+function refreshAppActivityListener() {
+  if (!_appActivityPages.size) { _appActivityListener?.stop(); return; }
+  appActivityListener().start().catch(err => console.warn('[AppActivity] could not start listening:', err.message));
+}
+
+function unwatchAppActivity(id) {
+  if (_appActivityPages.delete(id)) refreshAppActivityListener();
+}
+
+/** Start handing a server page what other apps announce. */
+function watchAppActivity(contents) {
+  const id = contents.id;
+  if (!_appActivityHooked.has(contents)) {
+    _appActivityHooked.add(contents);
+    // A page that goes away, or loads anew, asks again for itself.
+    contents.once('destroyed', () => unwatchAppActivity(id));
+    contents.on('did-navigate', () => unwatchAppActivity(id));
+  }
+  _appActivityPages.set(id, contents);
+  refreshAppActivityListener();
+  safeSend(contents, 'app-activity:update', appActivityListener().current());
+}
+
+function askAboutAppActivity(serverUrl) {
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  const options = {
+    type: 'question',
+    title: t('appActivity.ask.title'),
+    message: t('appActivity.ask.message', { host: dialogHost(serverUrl) }),
+    detail: t('appActivity.ask.detail'),
+    buttons: [t('dialog.cancel'), t('appActivity.ask.confirm')],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  return (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options))
+    .then(({ response }) => response === 1);
+}
+
+// ── Show a dialog with an auto-timeout ─────────────────
+// Wraps `dialog.showMessageBox` so an unanswered "server unreachable"
+// popup doesn't trap the app forever. After `timeoutMs` we resolve as
+// if the user picked the default (destructive) button. The original
+// dialog stays on screen until the user dismisses it; the post-dialog
+// code path uses the `.timedOut` flag to avoid double-acting on a
+// late user response.
+async function showDialogWithTimeout(parent, options, timeoutMs = 30000) {
+  let timer = null;
+  const timeoutPromise = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      resolve({ response: options.defaultId || 0, timedOut: true });
+    }, timeoutMs);
+  });
+  const dialogPromise = dialog.showMessageBox(parent, options).then((res) => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    return res;
+  });
+  return Promise.race([timeoutPromise, dialogPromise]);
+}
+
+// ── Reset to welcome screen ─────────────────────────────
+// clearPrefs=true only when the user explicitly requests a full reset
+// (Ctrl+Shift+Home). Automatic failures (load errors, etc.) use the default
+// clearPrefs=false so the stored server path survives and next launch retries.
+function resetToWelcome(clearPrefs = false) {
+  serverManager?.stopServer();
+  // Clean up all BrowserViews
+  for (const [url, view] of serverViews) {
+    mainWindow?.removeBrowserView(view);
+    try { view.webContents.destroy(); } catch {}
+  }
+  serverViews.clear();
+  serverBadgeState.clear();
+  knownServerUrlsByView.clear();
+  activeServerUrl = null;
+  primaryServerUrl = null;
+  if (clearPrefs) {
+    // Full reset: user explicitly chose to forget their server
+    store.set('userPrefs.skipWelcome', false);
+    store.set('userPrefs.serverUrl', null);
+    store.set('userPrefs.mode', null);
+  }
+  createWelcomeWindow();
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+  createTray();
+}
+
+app.on('window-all-closed', () => {
+  globalShortcut.unregisterAll();
+  app.quit();
+});
+
+app.on('before-quit', () => {
+  app.isQuitting = true;
+  // The X11 copy quitting soon after it opened is the user closing it, not
+  // a failed X11 start (Haven #5741).
+  if (isX11Copy(process.argv)) clearX11Pending();
+  serverManager?.stopServer();
+  pipeWireStreamRouter?.stop();
+  audioCapture?.cleanup();
+  voiceOverlay?.destroy();
+  _appActivityListener?.stop();
+});
+
+// ═══════════════════════════════════════════════════════════
+// Window Factories
+// ═══════════════════════════════════════════════════════════
+
+// ── Taskbar icon for a copy run from source (Windows) ────
+// A copy run from source is electron.exe, and Windows 11 draws a combined
+// taskbar button from the program's own icon (Electron's logo) unless the
+// window names a relaunch icon. The app id alone did not change that. Build a
+// Haven .ico once from icon.png into userData and attach it, with a relaunch
+// command, to each window. Installed copies already carry the icon in their
+// exe, so they are left alone.
+let devTaskbarIcon = null;
+function devTaskbarIconPath() {
+  if (devTaskbarIcon !== null) return devTaskbarIcon;
+  devTaskbarIcon = '';
+  try {
+    const base = nativeImage.createFromPath(ICON_PATH);
+    if (base.isEmpty()) return devTaskbarIcon;
+    // An .ico of PNG images, one per size Windows asks for.
+    const sizes = [16, 24, 32, 48, 64, 128, 256];
+    const pngs = sizes.map(size => base.resize({ width: size, height: size, quality: 'best' }).toPNG());
+    const header = Buffer.alloc(6);
+    header.writeUInt16LE(0, 0);
+    header.writeUInt16LE(1, 2);
+    header.writeUInt16LE(sizes.length, 4);
+    const entries = Buffer.alloc(16 * sizes.length);
+    let offset = header.length + entries.length;
+    sizes.forEach((size, i) => {
+      const at = i * 16;
+      entries.writeUInt8(size >= 256 ? 0 : size, at);
+      entries.writeUInt8(size >= 256 ? 0 : size, at + 1);
+      entries.writeUInt16LE(1, at + 4);
+      entries.writeUInt16LE(32, at + 6);
+      entries.writeUInt32LE(pngs[i].length, at + 8);
+      entries.writeUInt32LE(offset, at + 12);
+      offset += pngs[i].length;
+    });
+    // Kept outside the profile folder: the Start Menu shortcut points at this
+    // file for good, and a profile can be a throwaway one that gets deleted,
+    // which left the taskbar showing a blank page.
+    const dir = path.join(process.env.LOCALAPPDATA || app.getPath('appData'), 'Haven Desktop (source)');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'haven-taskbar.ico');
+    const data = Buffer.concat([header, entries, ...pngs]);
+    let same = false;
+    try { same = fs.readFileSync(file).equals(data); }
+    catch (err) { if (err.code !== 'ENOENT') console.warn('[Haven] could not read the taskbar icon:', err.message); }
+    if (!same) fs.writeFileSync(file, data);
+    devTaskbarIcon = file;
+    fixDevStartMenuShortcuts(file);
+  } catch (err) {
+    console.warn('[Haven] could not build the taskbar icon:', err.message);
+  }
+  return devTaskbarIcon;
+}
+
+// Windows takes the taskbar icon and name for an app id from a Start Menu
+// shortcut that carries that id, ahead of anything the window sets. A copy run
+// from source used to end up with Electron's icon, or a blank page, because
+// Electron writes its own shortcut for notifications (see dev-shortcut.js).
+//
+// scripts/brand-dev-electron.js (run by "Start Haven Desktop.bat" and npm
+// install) stamps the Haven icon and the name "Haven Desktop (source)" into
+// electron.exe, so Electron's shortcut gets that name and icon. The copy you
+// actually use (its normal profile, not a temporary one from --user-data-dir,
+// and not something run out of the temp folder) writes that same shortcut
+// with its arguments, in the form Electron accepts as valid, so Electron
+// keeps it and there is one entry that starts Haven. Other shortcuts with
+// this id that start electron.exe (the "Electron.lnk" an unstamped exe makes,
+// stale copies, test runs) are removed so they cannot win. An installed
+// Haven's own shortcut starts Haven.exe and is left alone.
+function ownsDevShortcut() {
+  if (app.commandLine.hasSwitch('user-data-dir')) return false;
+  const tmp = path.resolve(os.tmpdir()).toLowerCase();
+  const inTemp = (p) => path.resolve(p || '').toLowerCase().startsWith(tmp);
+  return !inTemp(process.execPath) && !inTemp(app.getAppPath());
+}
+
+function fixDevStartMenuShortcuts(icon) {
+  if (!ownsDevShortcut()) return;
+  const { shell } = require('electron');
+  const programs = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs');
+  const wanted = path.join(programs, devShortcut.devShortcutName());
+  const options = devShortcut.devShortcutOptions({
+    execPath: process.execPath,
+    appPath: app.getAppPath(),
+    dev: IS_DEV,
+    icon,
+  });
+  let names = [];
+  try {
+    names = fs.readdirSync(programs).filter(name => name.toLowerCase().endsWith('.lnk'));
+  } catch (err) {
+    console.warn('[Haven] could not read the Start Menu folder:', err.message);
+    return;
+  }
+  for (const name of names) {
+    const file = path.join(programs, name);
+    if (file.toLowerCase() === wanted.toLowerCase()) continue;
+    let link;
+    try { link = shell.readShortcutLink(file); }
+    catch { continue; } // some shortcuts (installer "advertised" ones) cannot be read, and none of those are ours
+    if (!devShortcut.isStaleDevShortcut(link)) continue;
+    try { fs.unlinkSync(file); }
+    catch (err) { console.warn('[Haven] could not remove a stale Start Menu shortcut:', err.message); }
+  }
+  let current = null;
+  try { current = shell.readShortcutLink(wanted); }
+  catch (err) { if (fs.existsSync(wanted)) console.warn('[Haven] could not read the Start Menu shortcut:', err.message); }
+  if (devShortcut.sameShortcut(current, options)) return;
+  try {
+    shell.writeShortcutLink(wanted, current ? 'replace' : 'create', options);
+  } catch (err) {
+    console.warn('[Haven] could not write the Start Menu shortcut:', err.message);
+  }
+}
+
+function applyDevTaskbarIcon(win) {
+  if (process.platform !== 'win32' || app.isPackaged || !win || win.isDestroyed()) return;
+  const icon = devTaskbarIconPath();
+  if (!icon) return;
+  try {
+    win.setAppDetails({
+      appId: 'com.haven.desktop',
+      appIconPath: icon,
+      appIconIndex: 0,
+      relaunchCommand: `"${process.execPath}" "${app.getAppPath()}"${IS_DEV ? ' --dev' : ''}`,
+      relaunchDisplayName: 'Haven Desktop',
+    });
+  } catch (err) {
+    console.warn('[Haven] could not set the taskbar icon:', err.message);
+  }
+}
+
+// The welcome window and the app window's own splash and error pages hold
+// the bridge that can start a server on this computer. They only ever show
+// local files the app loads itself, so the page may not go anywhere else: a
+// link dragged onto the window used to open a remote page there, with that
+// bridge still attached. Web links go to the system browser instead.
+// Only web links go to the system browser. Anything else handed to the OS
+// shell can run code on Windows (ms-msdt:, search-ms:, file: and network
+// shares).
+function openWebLink(url) {
+  let parsed = null;
+  try { parsed = new URL(url); } catch { return; } // not a URL: nothing to open
+  if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+    shell.openExternal(parsed.href).catch(err => console.warn('[Haven] could not open a link:', err.message));
+  }
+}
+
+function keepOnLocalFiles(contents) {
+  contents.on('will-navigate', (event, url) => {
+    event.preventDefault();
+    openWebLink(url);
+  });
+  contents.on('will-redirect', (event) => event.preventDefault());
+  contents.on('will-attach-webview', (event) => event.preventDefault());
+  contents.setWindowOpenHandler(({ url }) => {
+    openWebLink(url);
+    return { action: 'deny' };
+  });
+}
+
+function contentsOf(win) {
+  return win && !win.isDestroyed() ? win.webContents : null;
+}
+
+/** An IPC call from the welcome window's own local page, in its top frame. */
+function fromWelcomeScreen(e) {
+  const own = contentsOf(welcomeWindow);
+  return !!own && e?.sender === own && isLocalScreenFrame(e.sender, e.senderFrame);
+}
+
+/** An IPC call from one of the app's own screens: the welcome window, or the
+ *  app window's splash and error pages, in their top frame. */
+function fromAppScreen(e) {
+  const sender = e?.sender;
+  if (!sender) return false;
+  const own = sender === contentsOf(welcomeWindow) || sender === contentsOf(mainWindow);
+  return own && isLocalScreenFrame(sender, e.senderFrame);
+}
+
+/** An IPC call from the top frame of the server page the user is looking at. */
+function fromActiveServer(e) {
+  return !!getTrustedServerUrlForFrame(e?.sender, e?.senderFrame, { active: true });
+}
+
+/** An IPC call from the top frame of any open server page, shown or not. */
+function fromAnyServer(e) {
+  return !!getTrustedServerUrlForFrame(e?.sender, e?.senderFrame);
+}
+
+function hideWelcome() {
+  welcomeWanted = false;
+  if (welcomeWindow && !welcomeWindow.isDestroyed()) welcomeWindow.hide();
+}
+
+function createWelcomeWindow() {
+  welcomeWanted = true;
+  if (welcomeWindow && !welcomeWindow.isDestroyed()) {
+    welcomeWindow.show();
+    welcomeWindow.focus();
+    return;
+  }
+  welcomeWindow = new BrowserWindow({
+    width: 720, height: 560,
+    minWidth: 620, minHeight: 480,
+    resizable: false,
+    frame: false,
+    backgroundColor: store.get('themeColors.bg') || '#0d0d1a',
+    icon: ICON_PATH,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      // The page and the preload's bridge stay apart, so the page can only
+      // call what window.haven offers.
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+    show: false,
+  });
+
+  applyDevTaskbarIcon(welcomeWindow);
+  keepOnLocalFiles(welcomeWindow.webContents);
+  welcomeWindow.loadFile(path.join(__dirname, '..', 'renderer', 'welcome.html'));
+  welcomeWindow.once('ready-to-show', () => {
+    welcomeWindow.show();
+    if (IS_DEV) welcomeWindow.webContents.openDevTools({ mode: 'detach' });
+  });
+  welcomeWindow.on('closed', () => { welcomeWindow = null; welcomeWanted = false; });
+}
+
+function createAppWindow(serverUrl) {
+  if (!mainWindow) {
+    voiceOverlay?.setAppOpen(true);
+    const bounds = usableBounds(store.get('windowBounds'), screen.getAllDisplays());
+    mainWindow = new BrowserWindow({
+      ...bounds,
+      minWidth: 800, minHeight: 600,
+      frame: true,
+      autoHideMenuBar: !!store.get('hideMenuBar'),
+      backgroundColor: store.get('themeColors.bg') || '#0d0d1a',
+      icon: ICON_PATH,
+      show: false,
+      // The BrowserView per-server already disables backgroundThrottling, but
+      // the top-level window also hosts splash and (briefly) error pages.
+      // Keeping it un-throttled means transient overlays don't add a second
+      // throttle layer on top of the per-view setting during screen share. (#5379)
+      webPreferences: {
+        backgroundThrottling: false,
+        preload: path.join(__dirname, 'splash-preload.js'),
+        sandbox: false,
+      },
+    });
+
+    applyDevTaskbarIcon(mainWindow);
+    keepOnLocalFiles(mainWindow.webContents);
+
+    // Show a splash page in the main window itself while the active server's
+    // BrowserView loads. Without this the window opens to a flat dark
+    // rectangle (or, with show:false, simply never appears) for the ~30-40 s
+    // a cold-start cross-tunnel HTTPS handshake can take. The splash gets
+    // covered by the BrowserView once it's expanded to full size below.
+    try {
+      mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'splash.html'));
+    } catch (e) {
+      console.warn('[Haven] Could not load splash:', e?.message || e);
+    }
+
+    const saveBounds = () => {
+      if (!mainWindow || mainWindow.isMaximized()) return;
+      const b = mainWindow.getBounds();
+      store.set('windowBounds', { x: b.x, y: b.y, width: b.width, height: b.height });
+    };
+    mainWindow.on('resize', saveBounds);
+    mainWindow.on('move',   saveBounds);
+
+    // Keep BrowserView geometry coherent across maximize / restore / drag-
+    // resize. Background views must remain at 0×0 with autoResize off; only
+    // the active view is allowed to follow native window resizes.
+    let syncViewBoundsTimer = null;
+    const syncViewBounds = () => {
+      try { syncAllServerViewBounds(); } catch (e) {
+        console.warn('[Haven Desktop] syncViewBounds failed:', e?.message || e);
+      }
+
+      // Mutter can emit the Wayland maximize/fullscreen state before Electron
+      // exposes the configured surface size. Reconcile once that transition
+      // has settled instead of leaving the view at its old (usually 1200×800)
+      // bounds.
+      clearTimeout(syncViewBoundsTimer);
+      syncViewBoundsTimer = setTimeout(() => {
+        try { syncAllServerViewBounds(); } catch (e) {
+          console.warn('[Haven Desktop] deferred syncViewBounds failed:', e?.message || e);
+        }
+      }, 100);
+    };
+    mainWindow.on('resize', syncViewBounds);
+    mainWindow.on('maximize', syncViewBounds);
+    mainWindow.on('unmaximize', syncViewBounds);
+    mainWindow.on('enter-full-screen', syncViewBounds);
+    mainWindow.on('leave-full-screen', syncViewBounds);
+
+    // The taskbar flash says "look over here", and looking is what stops it.
+    // Windows keeps a flashFrame(true) going until it is told to stop, and
+    // the only stop was every unread being read, so one unread the person
+    // could not or would not open (a muted server, a hidden channel) left
+    // the taskbar button blinking for good. The unread badge stays; only the
+    // blinking ends. (Haven #5683)
+    mainWindow.on('focus', () => {
+      try { mainWindow.flashFrame(false); } catch {}
+      // Back from another window, focus goes to the server page, not the
+      // window's own frame: keys land in the page, and the page can tell it
+      // is being looked at, which decides whether the open chat notifies.
+      // (Haven-Desktop #58)
+      try {
+        const view = activeServerUrl && serverViews.get(activeServerUrl);
+        if (view && !view.webContents.isDestroyed()) view.webContents.focus();
+      } catch {}
+    });
+
+    // ── Minimize-to-tray: intercept close if enabled ──
+    mainWindow.on('close', (e) => {
+      if (!app.isQuitting && store.get('minimizeToTray')) {
+        e.preventDefault();
+        mainWindow.hide();
+      }
+    });
+
+    // Badge is cleared by the web app when unreads reach zero, not on raw focus.
+    // Clearing on focus caused the overlay to vanish even while unreads remained.
+    mainWindow.on('closed', () => {
+      // The welcome window is kept hidden behind the app so the connection
+      // error page can bring it back. Once the app window is gone with
+      // nothing else showing, closing the window has to close the app, or
+      // it would live on unseen behind the hidden welcome window.
+      if (!app.isQuitting && welcomeWindow && !welcomeWindow.isDestroyed() && !welcomeWanted) {
+        setTimeout(() => { if (!app.isQuitting) app.quit(); }, 0);
+      }
+      serverViews.clear();
+      serverBadgeState.clear();
+      knownServerUrlsByView.clear();
+      activeServerUrl = null;
+      primaryServerUrl = null;
+      mainWindow = null;
+      voiceOverlay?.setAppOpen(false);
+    });
+  }
+
+  // Track the user's chosen server so load failures on peer links don't wipe the session
+  if (!primaryServerUrl) {
+    try { primaryServerUrl = new URL(serverUrl).origin; } catch { primaryServerUrl = serverUrl; }
+  }
+
+  switchToServer(serverUrl);
+
+  // Pre-load background BrowserViews for the user's other known servers so
+  // their unread counts can light up the sidebar dots in real time. Toggle
+  // via Desktop settings (default: on). Capped to keep RAM usage reasonable.
+  scheduleBackgroundServerPreload(serverUrl);
+
+  if (!mainWindow.isVisible() && !START_HIDDEN) {
+    mainWindow.show();
+  }
+  hideWelcome();
+}
+
+function otherServerUrl(failedUrl) {
+  const failed = failedUrl ? normalizeServerUrl(failedUrl) : '';
+  if (primaryServerUrl && primaryServerUrl !== failed) return primaryServerUrl;
+  const pref = store.get('userPrefs.serverUrl');
+  if (pref) {
+    const normalized = normalizeServerUrl(pref);
+    if (normalized && normalized !== failed) return normalized;
+  }
+  const history = store.get('serverHistory') || [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    const candidate = history[i]?.url && normalizeServerUrl(history[i].url);
+    if (candidate && candidate !== failed) return candidate;
+  }
+  return '';
+}
+
+function showConnectionError(failedUrl) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const view = serverViews.get(failedUrl);
+  if (view) {
+    try { mainWindow.removeBrowserView(view); } catch {}
+    try { view.webContents.destroy(); } catch {}
+    serverViews.delete(failedUrl);
+    serverBadgeState.delete(failedUrl);
+    knownServerUrlsByView.delete(failedUrl);
+  }
+  for (const [, other] of serverViews) {
+    try { mainWindow.removeBrowserView(other); } catch {}
+  }
+  const back = otherServerUrl(failedUrl);
+  mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'connection-error.html'), {
+    query: { url: failedUrl || '', primary: back || '' },
+  }).catch((e) => {
+    console.warn('[Haven] Could not load connection-error page:', e?.message || e);
+  });
+  if (!mainWindow.isVisible()) mainWindow.show();
+}
+
+// ── Multi-Server View Management ────────────────────────────
+
+// On Windows the server page covered the window's right and bottom resize
+// edges (and that corner) after the move to Electron 42: the cursor flickered
+// and the edge could not be grabbed. Keeping the page 1 pixel short of those
+// edges hands them back to the window frame. HAVEN_VIEW_INSET overrides the
+// gap (0 turns it off, at most 8).
+const VIEW_INSET = (() => {
+  const set = parseInt(process.env.HAVEN_VIEW_INSET, 10);
+  if (Number.isFinite(set)) return Math.max(0, Math.min(8, set));
+  return process.platform === 'win32' ? 1 : 0;
+})();
+
+// A maximized or full-screen window has no edges to grab, so the gap would
+// only show as a thin strip; the page fills it then (maximize and full
+// screen both resize the views).
+function fullViewBounds(cw, ch) {
+  const edges = mainWindow && !mainWindow.isDestroyed() && !mainWindow.isMaximized() && !mainWindow.isFullScreen();
+  const inset = edges ? VIEW_INSET : 0;
+  return { x: 0, y: 0, width: Math.max(1, cw - inset), height: Math.max(1, ch - inset) };
+}
+
+/** Pin every non-active server view at 0×0 (no autoResize) and size the
+ *  active view to the window content area. Safe to call on every resize /
+ *  maximize (idempotent). */
+function syncAllServerViewBounds() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  let cw = 0, ch = 0;
+  try { [cw, ch] = mainWindow.getContentSize(); } catch { return; }
+  if (cw < 1 || ch < 1) return;
+
+  for (const [url, view] of serverViews) {
+    if (!view || !view.webContents || view.webContents.isDestroyed?.()) continue;
+    const isActive = url === activeServerUrl;
+    try {
+      if (isActive) {
+        // Don't expand over the splash before the active view's page is
+        // ready; its dom-ready handler will expand it.
+        if (!view._havenPageReady && view.getBounds().width === 0) {
+          view.setAutoResize({ width: false, height: false, horizontal: false, vertical: false });
+          continue;
+        }
+        view.setBounds(fullViewBounds(cw, ch));
+        // Native auto-resize follows Wayland configure events even when the
+        // corresponding BrowserWindow resize event reports stale dimensions.
+        view.setAutoResize({ width: true, height: true, horizontal: false, vertical: false });
+      } else {
+        // Auto-resizing a hidden 0×0 view makes it grow by the window delta and
+        // overlap the active server on maximize.
+        view.setAutoResize({ width: false, height: false, horizontal: false, vertical: false });
+        view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+      }
+    } catch {}
+  }
+  // Keep the active view on top after bound changes.
+  if (activeServerUrl && serverViews.has(activeServerUrl)) {
+    try { mainWindow.setTopBrowserView(serverViews.get(activeServerUrl)); } catch {}
+  }
+}
+
+function switchToServer(serverUrl) {
+  const url = normalizeServerUrl(serverUrl);
+  if (!mainWindow) return;
+
+  // Reuse a pre-created background view if one exists, otherwise create
+  ensureServerView(url);
+  const view = serverViews.get(url);
+  if (!view) return;
+
+  mainWindow.setTopBrowserView(view);
+  activeServerUrl = url;
+  if ((store.get('language') || SYSTEM_LANGUAGE) === SYSTEM_LANGUAGE) {
+    const reportedLocale = serverLanguageStates.get(url)?.locale;
+    applyAutomaticServerLocale(reportedLocale || resolveLocale(SYSTEM_LANGUAGE, getSystemLanguages()));
+  }
+  safeSend(view.webContents, 'i18n:became-active', getI18nState());
+  // A hidden page is not given the server list or the badges; now that it
+  // is on screen, it reads the list again and gets the current badges.
+  safeSend(view.webContents, 'server-list:changed');
+  sendServerBadges(view.webContents);
+
+  // Make sure the freshly-promoted view actually fills the window. Newly
+  // created views start at 0×0 (so the splash stays visible during load),
+  // and background-preloaded views never get expanded until you switch to
+  // them. Also re-pin every other view at 0×0 so a prior maximize can't
+  // leave a badge-poller view covering the active one.
+  try {
+    syncAllServerViewBounds();
+    const [cw, ch] = mainWindow.getContentSize();
+    const b = view.getBounds();
+    if (b.width !== cw || b.height !== ch) {
+      // Only expand once the view's page is ready; otherwise its dom-ready
+      // handler does it, so the splash stays up until there is a page.
+      if (view._havenPageReady) {
+        view.setBounds(fullViewBounds(cw, ch));
+        view.setAutoResize({ width: true, height: true, horizontal: false, vertical: false });
+      }
+    }
+  } catch {}
+
+  // Pull the active view's <title> up to the BrowserWindow so the OS window
+  // chrome stops saying "Loading Haven…" once a real renderer is on top.
+  // (mainWindow.webContents = splash.html, whose <title> never changes, so
+  // without this, the window title is stuck on the splash text forever.)
+  try {
+    const t = (view.webContents.getTitle() || '').trim();
+    mainWindow.setTitle(t && !/^Loading Haven/i.test(t) ? t : 'Haven');
+  } catch {}
+
+  // Save to server history. Opening a server also lifts an earlier removal.
+  const _list = readServerList(store);
+  const _before = JSON.stringify(_list);
+  markConnected(_list, url);
+  saveServerList(_list, _before);
+}
+
+// Write the shared server list and, when it changed, tell every open server
+// page so their sidebars follow without waiting for a reload.
+function saveServerList(list, before) {
+  if (JSON.stringify(list) === before) return false;
+  writeServerList(store, list);
+  for (const [, view] of serverViews) safeSend(view.webContents, 'server-list:changed');
+  return true;
+}
+
+// ── Server list changes asked for by a server page ──────
+// A server page may not decide alone which other servers the user has: the
+// app asks the user first, in its own dialog, naming the change and the
+// server whose page asked (rules in server-list-gate.js).
+const _serverListGate = createRequestGate({ ask: askAboutServerListChange });
+
+function askAboutServerListChange(text) {
+  const parent = [mainWindow, welcomeWindow].find(w => w && !w.isDestroyed());
+  if (parent?.isMinimized()) parent.restore();
+  const options = {
+    type: 'question',
+    title: text.title,
+    message: text.message,
+    detail: text.detail,
+    buttons: [text.cancel, text.confirm],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    checkboxLabel: text.block,
+    checkboxChecked: false,
+  };
+  return (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options))
+    .then(({ response, checkboxChecked }) => ({ confirmed: response === 1, block: !!checkboxChecked }));
+}
+
+/** Who sent a server list request: one of the app's own screens
+ *  ({ local: true }), the top frame of a server page ({ url, id }), or
+ *  anything else (null, refused). */
+function serverListSender(e) {
+  if (isLocalScreenFrame(e.sender, e.senderFrame) && !getServerUrlForContents(e.sender)) return { local: true };
+  const url = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+  return url ? { local: false, url, id: e.sender.id } : null;
+}
+
+/** Make a change to the server list for a page, asking the user when the
+ *  rules say so. Resolves to { applied, result, saved }: result is what the
+ *  list function returned, or why nothing changed ('declined', 'busy',
+ *  'blocked', 'denied'). action is what the app's preload saw when the
+ *  page called: { user } the page marked the change as the user's own,
+ *  { fresh } the user clicked or typed in the page just now. */
+async function requestServerListChange(e, request, action) {
+  const user = !!action && action.user === true;
+  const fresh = !!action && action.fresh === true;
+  request = { ...request, user };
+  const sender = serverListSender(e);
+  if (!sender) return { applied: false, result: 'denied', saved: false };
+  let list = readServerList(store);
+  if (!sender.local) {
+    // A server already open in the app opens again without a question,
+    // even one the list cannot keep (a one-word host such as http://nas:3000).
+    const planOptions = { openUrls: [...serverViews.keys()] };
+    const plan = planPageRequest(list, request, sender.url, planOptions);
+    if (plan.action === 'ignore') return { applied: false, result: plan.result, saved: false };
+    if (plan.action === 'ask') {
+      const asker = list.history.find(h => h.url === sender.url);
+      const text = promptText(plan.prompt, { name: asker?.name, url: sender.url }, t);
+      const answer = await _serverListGate.request({ senderId: sender.id, requester: sender.url, key: plan.key, text, fresh });
+      if (answer !== 'confirmed') return { applied: false, result: answer, saved: false };
+      // The list may have changed while the question was open.
+      list = readServerList(store);
+      const again = planPageRequest(list, request, sender.url, planOptions);
+      if (again.action === 'ignore') return { applied: false, result: again.result, saved: false };
+    }
+  }
+  const before = JSON.stringify(list);
+  const result = applyPageRequest(list, request);
+  return { applied: true, result, saved: saveServerList(list, before) };
+}
+
+// The user removed a server from the list: stop its hidden background view
+// too, so its unread badge cannot bring it back. The open server and the
+// one the app connects to first stay.
+function closeBackgroundServerView(serverUrl) {
+  const url = normalizeServerUrl(serverUrl);
+  if (!url || url === activeServerUrl || url === primaryServerUrl) return;
+  const view = serverViews.get(url);
+  if (!view) return;
+  try { mainWindow?.removeBrowserView(view); } catch (e) { console.warn('[Haven Desktop] Could not detach removed server view:', e.message); }
+  try { view.webContents.destroy(); } catch (e) { console.warn('[Haven Desktop] Could not close removed server view:', e.message); }
+  serverViews.delete(url);
+  serverBadgeState.delete(url);
+  knownServerUrlsByView.delete(url);
+  recomputeTaskbarBadge();
+}
+
+// Pre-create a BrowserView for a server WITHOUT making it the visible/active
+// view. Lets background servers run their renderer (and thus their socket
+// connections) so per-server unread badges can light up on the sidebar of
+// the active view. Idempotent: second call for the same URL is a no-op.
+function ensureServerView(serverUrl, { background = false } = {}) {
+  const url = normalizeServerUrl(serverUrl);
+  if (!mainWindow) return null;
+  let view = serverViews.get(url);
+  if (view) return view;
+
+  {
+    view = new BrowserView({
+      webPreferences: {
+        preload: path.join(__dirname, 'app-preload.js'),
+        // The server page runs apart from the preload, which alone holds
+        // ipcRenderer; the page gets window.havenDesktop through
+        // contextBridge (app-preload.js). The preload still loads the app's
+        // own modules with require, so it is not sandboxed.
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+
+        webSecurity: true,
+        spellcheck: true,
+        // Prevent Chromium from suspending AudioContext and throttling timers
+        // when the window is minimised or loses focus.  Without this the
+        // _startAnalyser / _startLocalTalkDetection setIntervals are coalesced
+        // to 1-second buckets and the AudioContext is auto-suspended, which
+        // makes voice-activity indicators go dark until the window is restored
+        // AND the AudioContext is explicitly resumed.
+        backgroundThrottling: false,
+      },
+    });
+    mainWindow.addBrowserView(view);
+    const [w, h] = mainWindow.getContentSize();
+    // Start the view hidden (0×0) so the splash page underneath stays visible
+    // while the renderer loads. We expand to full size only when this view
+    // is the active one and finishes loading. That prevents the user from
+    // staring at a blank dark rectangle for 30-40 s on cold-start
+    // cross-tunnel handshakes. Background-preloaded views stay at 0×0
+    // until the user actually switches to them (see switchToServer).
+    // Start hidden. Auto-resize is enabled only after this becomes the loaded,
+    // active view; background badge views must stay pinned at 0×0.
+    view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+    try {
+      view.setAutoResize({ width: false, height: false, horizontal: false, vertical: false });
+    } catch {}
+    const _expandIfActive = () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (activeServerUrl !== url) return;
+      try {
+        const [cw, ch] = mainWindow.getContentSize();
+        view.setBounds(fullViewBounds(cw, ch));
+        view.setAutoResize({ width: true, height: true, horizontal: false, vertical: false });
+        mainWindow.setTopBrowserView(view);
+        safeSend(view.webContents, 'i18n:became-active', getI18nState());
+      } catch {}
+    };
+    // Safety net: even if the active server is unreachable, drop the splash
+    // after 20 s so the user sees the BrowserView's own error page instead
+    // of an eternal spinner.
+    const _expandTimer = setTimeout(_expandIfActive, 20000);
+    const _syncTitleIfActive = () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (activeServerUrl !== url) return;
+      try {
+        const t = (view.webContents.getTitle() || '').trim();
+        // The server's app.html sets <title>Haven</title>; the auth page sets
+        // <title>Haven · Sign In</title>; etc. Anything non-empty that isn't
+        // the splash placeholder is a better window title than "Loading Haven…".
+        if (t && !/^Loading Haven/i.test(t)) {
+          mainWindow.setTitle(t);
+        } else {
+          mainWindow.setTitle('Haven');
+        }
+      } catch {}
+    };
+    // The page shows as soon as it is ready (dom-ready), the way a browser
+    // shows it, not when every picture on it has arrived (did-finish-load).
+    // Waiting for the load event kept the splash up for as long as one slow
+    // outside image or script took, so a server that opened in a second in a
+    // browser sat on "connecting" in the app.
+    view.webContents.once('dom-ready',       () => { view._havenPageReady = true; clearTimeout(_expandTimer); _expandIfActive(); _syncTitleIfActive(); });
+    view.webContents.once('did-fail-load',   () => { clearTimeout(_expandTimer); _expandIfActive(); _syncTitleIfActive(); });
+    // Each subsequent in-page navigation (e.g. login → app, channel switch)
+    // also gets reflected in the window title once the view is the active one.
+    view.webContents.on('page-title-updated', _syncTitleIfActive);
+
+    view.webContents.loadURL(buildServerAppUrl(url));
+
+    // ── Forward renderer performance logs to main process console ──
+    // The renderer's automatic perf diagnostics use console.warn/log with
+    // a [Haven Perf] prefix.  Capture those here so they appear in the
+    // server console panel and Electron's stdout for post-mortem analysis.
+    view.webContents.on('console-message', (_e, level, message) => {
+      if (message.startsWith('[Haven Perf') || message.startsWith('[ScreenShare]')) {
+        // level: 0=verbose, 1=info, 2=warning, 3=error
+        if (level >= 2) console.warn('[Renderer]', message);
+        else            console.log('[Renderer]', message);
+      }
+    });
+
+    // BrowserView keyboard accelerators can fail to trigger Chromium's
+    // built-in copy command on some Windows setups. Forward Ctrl/Cmd+C
+    // explicitly so selected message text reaches the clipboard.
+    view.webContents.on('before-input-event', (event, input) => {
+
+      const isCopy = input.type === 'keyDown'
+        && !input.isAutoRepeat
+        && (input.control || input.meta)
+        && !input.alt
+        && String(input.key || '').toLowerCase() === 'c';
+      if (!isCopy) return;
+      event.preventDefault();
+      try { view.webContents.copy(); } catch {}
+    });
+
+    // ── Spell-check suggestions in right-click context menu (#25) ──
+    // Electron doesn't surface suggestions automatically; we build a small
+    // Menu from params.dictionarySuggestions and params.misspelledWord so
+    // users can apply a correction just like they would in a browser.
+    const attachContextMenu = (wc, win) => wc.on('context-menu', (_e, params) => {
+      const items = [];
+
+      // ── Spellcheck suggestions (when right-clicking a misspelled word) ──
+      if (params.misspelledWord) {
+        const suggestions = params.dictionarySuggestions || [];
+        if (suggestions.length) {
+          for (const suggestion of suggestions.slice(0, 6)) {
+            items.push({
+              label: suggestion,
+              click: () => { try { wc.replaceMisspelling(suggestion); } catch {} },
+            });
+          }
+          items.push({ type: 'separator' });
+        }
+        items.push({
+          label: t('context.addToDictionary'),
+          click: () => {
+            try { wc.session.addWordToSpellCheckerDictionary(params.misspelledWord); } catch {}
+          },
+        });
+        items.push({ type: 'separator' });
+      }
+
+      // ── Link actions ──
+      if (params.linkURL) {
+        items.push({
+          label: t('context.copyLink'),
+          click: () => { try { require('electron').clipboard.writeText(params.linkURL); } catch {} },
+        });
+        items.push({ type: 'separator' });
+      }
+
+      // ── Picture actions (Haven #5663) ──
+      // A picture opened in its own window had no menu at all, so there was
+      // no way to save or copy it from there.
+      if (params.mediaType === 'image' && params.srcURL) {
+        items.push({ label: t('context.saveImage'), click: () => { try { wc.downloadURL(params.srcURL); } catch {} } });
+        items.push({ label: t('context.copyImage'), click: () => { try { wc.copyImageAt(params.x, params.y); } catch {} } });
+        if (/^https?:\/\//i.test(params.srcURL)) {
+          items.push({ label: t('context.openImageExternal'), click: () => { try { shell.openExternal(params.srcURL); } catch {} } });
+        }
+        items.push({ type: 'separator' });
+      }
+
+      // ── Video and audio actions (Haven #5825) ──
+      // Electron has no menu of its own, so right-clicking a video offered
+      // nothing: no loop, no controls, no save. These act on the element
+      // under the pointer, like a browser's own menu.
+      if (params.mediaType === 'video' || params.mediaType === 'audio') {
+        const f = params.mediaFlags || {};
+        const isVideo = params.mediaType === 'video';
+        const media = (code) => {
+          const zoom = wc.getZoomFactor() || 1;
+          const x = Math.round(params.x / zoom), y = Math.round(params.y / zoom);
+          wc.executeJavaScript(`(() => { const m = document.elementFromPoint(${x}, ${y})?.closest('video, audio'); if (m) { ${code} } })()`)
+            .catch((err) => console.warn('[Context] media action failed:', err.message));
+        };
+        items.push({
+          label: f.isPaused ? t('context.play') : t('context.pause'),
+          click: () => media(f.isPaused ? "m.play()?.catch?.((e) => console.warn('[Context] play failed:', e.message))" : 'm.pause()'),
+        });
+        if (f.hasAudio !== false) items.push({ label: t('context.mute'), type: 'checkbox', checked: !!f.isMuted, click: () => media('m.muted = !m.muted') });
+        items.push({ label: t('context.loop'), type: 'checkbox', checked: !!f.isLooping, click: () => media('m.loop = !m.loop') });
+        if (f.canToggleControls) {
+          items.push({ label: t('context.showControls'), type: 'checkbox', checked: !!f.isControlsVisible, click: () => media('m.controls = !m.controls') });
+        }
+        if (/^(https?|blob):/i.test(params.srcURL || '')) {
+          items.push({
+            label: isVideo ? t('context.saveVideo') : t('context.saveAudio'),
+            click: () => { try { wc.downloadURL(params.srcURL); } catch (err) { console.warn('[Context] save failed:', err.message); } },
+          });
+        }
+        if (/^https?:\/\//i.test(params.srcURL || '')) {
+          items.push({
+            label: isVideo ? t('context.copyVideoAddress') : t('context.copyAudioAddress'),
+            click: () => require('electron').clipboard.writeText(params.srcURL),
+          });
+        }
+        items.push({ type: 'separator' });
+      }
+
+      // ── Standard editing actions ──
+      // Electron's BrowserView has no default context menu, so right-click on
+      // selectable text or an input previously offered nothing. Build the
+      // usual Cut/Copy/Paste/Select All from the params' editFlags.
+      const flags = params.editFlags || {};
+      const hasSelection = !!(params.selectionText && params.selectionText.trim());
+      if (params.isEditable || hasSelection) {
+        if (params.isEditable) items.push({ label: t('menu.cut'), role: 'cut', enabled: flags.canCut });
+        items.push({ label: t('menu.copy'), role: 'copy', enabled: flags.canCopy });
+        if (params.isEditable) items.push({ label: t('menu.paste'), role: 'paste', enabled: flags.canPaste });
+        items.push({ type: 'separator' });
+        items.push({ label: t('menu.selectAll'), role: 'selectAll' });
+      }
+
+      // Trim any trailing separator so the menu doesn't end with a divider.
+      while (items.length && items[items.length - 1].type === 'separator') items.pop();
+
+      if (!items.length) return;
+      try { Menu.buildFromTemplate(items).popup({ window: win }); } catch {}
+    });
+    attachContextMenu(view.webContents, mainWindow);
+    // A same-origin popup, such as a picture opened in its own window, gets
+    // the same menu (Haven #5663).
+    view.webContents.on('did-create-window', (child) => {
+      serverPopupOwners.set(child.webContents, url);
+      guardServerPopup(child.webContents);
+      try { attachContextMenu(child.webContents, child); } catch {}
+    });
+
+
+    // ── Page load timeout: if no content after 15 s, offer to go back ──
+    // Background-preloaded views are silent: they never show user dialogs.
+    // If they fail to load, they're cleaned up quietly so unread-badge
+    // pre-loading doesn't surface as a scary popup on launch.
+    let loadResolved = false;
+    // A page that is up counts as loaded, even while slow pictures finish.
+    view.webContents.once('dom-ready', () => { loadResolved = true; });
+    view.webContents.once('did-finish-load', async () => {
+      loadResolved = true;
+      // Check that the page is actually a Haven server by looking for a
+      // Haven-specific element. Catches the case where the server URL now
+      // points to a reverse proxy error page or a completely different site.
+      // Check both the app page (#app-body) and the login page (.auth-page).
+      const isHaven = await view.webContents.executeJavaScript(
+        '!!(document.getElementById("app-body") || document.querySelector(".auth-page") || document.title.startsWith("Haven"))'
+      ).catch(() => false);
+      if (isHaven || !mainWindow || mainWindow.isDestroyed()) return;
+      if (background) {
+        // Silent cleanup: don't bother the user about a background preload
+        mainWindow?.removeBrowserView(view);
+        try { view.webContents.destroy(); } catch {}
+        serverViews.delete(url);
+        serverBadgeState.delete(url);
+        knownServerUrlsByView.delete(url);
+        recomputeTaskbarBadge();
+        return;
+      }
+      {
+        // No more dialog: the previous "Keep Loading" option just stranded
+        // the user on a non-Haven page while the retry loop hammered a dead
+        // server.  When the page resolves to something that isn't Haven we
+        // just bail immediately, surface a toast on the destination, and
+        // either bounce back to the primary server (if this was a secondary
+        // hop) or to the welcome screen.  Five seconds of trying is plenty:
+        // anything beyond that is the server being broken, not slow.
+        const isSecondary = primaryServerUrl && url !== primaryServerUrl;
+        if (isSecondary) {
+          mainWindow?.removeBrowserView(view);
+          try { view.webContents.destroy(); } catch {}
+          serverViews.delete(url);
+          serverBadgeState.delete(url);
+          knownServerUrlsByView.delete(url);
+          recomputeTaskbarBadge();
+          if (primaryServerUrl && serverViews.has(primaryServerUrl)) {
+            switchToServer(primaryServerUrl);
+            const wc = serverViews.get(primaryServerUrl)?.webContents;
+            if (wc && !wc.isDestroyed()) {
+              const toastMessage = JSON.stringify(t('connection.notHaven'));
+              wc.executeJavaScript(`if (typeof app !== 'undefined' && typeof app._showToast === 'function') { app._showToast(${toastMessage}, 'error'); }`).catch(() => {});
+            }
+          } else {
+            showConnectionError(url);
+          }
+        } else {
+          showConnectionError(url);
+        }
+      }
+    });
+    // A page that is still arriving is left to finish, the way a browser
+    // would, for up to 90 s. Giving up at 15 s turned a slow route to the
+    // server into "Connection Problem" while the page was still loading.
+    const loadStartedAt = Date.now();
+    const checkLoad = () => {
+      // A certificate question holds the load open; the answer settles it.
+      if (loadResolved || !mainWindow || certQuestionPending(url)) return;
+      try {
+        if (view.webContents.isLoading() && Date.now() - loadStartedAt < 90000) {
+          setTimeout(checkLoad, 15000);
+          return;
+        }
+      } catch { return; } // view already torn down
+      // Check if the page actually has content (async, never blocks renderer or main)
+      view.webContents.executeJavaScript('document.body?.innerText?.length || 0').then(async (len) => {
+        if (len > 20) return; // Page has content, it's fine
+        if (background) {
+          // Background preload silently failed to load; just clean up
+          mainWindow?.removeBrowserView(view);
+          try { view.webContents.destroy(); } catch {}
+          serverViews.delete(url);
+          serverBadgeState.delete(url);
+          knownServerUrlsByView.delete(url);
+          recomputeTaskbarBadge();
+          return;
+        }
+        const isSecondary = primaryServerUrl && url !== primaryServerUrl;
+        if (isSecondary) {
+          const { response, timedOut } = await showDialogWithTimeout(mainWindow, {
+            type: 'warning',
+            buttons: [t('connection.goBackServer'), t('connection.keepWaiting')],
+            defaultId: 0,
+            title: t('connection.problemTitle'),
+            message: t('connection.problemMessage', { url }),
+          });
+          if (timedOut) console.warn('[main] "Connection Problem" dialog timed out, returning home');
+          const wantsOut = response !== 1; // 0 / -1 / undefined / Esc
+          if (wantsOut) {
+            mainWindow?.removeBrowserView(view);
+            try { view.webContents.destroy(); } catch {}
+            serverViews.delete(url);
+            serverBadgeState.delete(url);
+            knownServerUrlsByView.delete(url);
+            recomputeTaskbarBadge();
+            switchToServer(primaryServerUrl);
+          }
+        } else {
+          showConnectionError(url);
+        }
+      }).catch(() => {});
+    };
+    setTimeout(checkLoad, 15000);
+
+    // ── Handle load failures: only reset to welcome for the primary server ──
+    // Retry briefly on transient errors (server restart, brief outage) before
+    // giving up and dumping the user back to the welcome screen.
+    let _failRetryCount = 0;
+    const MAX_FAIL_RETRIES = 1; // ~1 s budget (longer waits stranded users on dead servers)
+    view.webContents.on('did-fail-load', (_e, errorCode, errorDesc, validatedUrl, isMainFrame) => {
+      // Ignore subframe failures (iframes, ads, etc.); only the main page matters.
+      if (isMainFrame === false) return;
+      console.error(`[Haven Desktop] Failed to load ${url}: ${errorCode} ${errorDesc}`);
+      // -3 ABORTED = navigation cancelled (e.g. another nav started). Ignore.
+      if (errorCode === -3) return;
+
+      // Background preload views never retry: they're best-effort badge
+      // pollers. Let the existing background-cleanup branch below handle them.
+      const TRANSIENT = new Set([
+        -102, // CONNECTION_REFUSED
+        -106, // INTERNET_DISCONNECTED
+        -109, // ADDRESS_UNREACHABLE
+        -118, // CONNECTION_TIMED_OUT
+        -7,   // TIMED_OUT
+        -21,  // NETWORK_CHANGED
+        -101, // CONNECTION_RESET
+        -105, // NAME_NOT_RESOLVED
+        -130, // PROXY_CONNECTION_FAILED
+        -324, // EMPTY_RESPONSE
+      ]);
+      if (!background && TRANSIENT.has(errorCode) && _failRetryCount < MAX_FAIL_RETRIES) {
+        _failRetryCount++;
+        const delay = Math.min(5000, 1000 * Math.pow(2, _failRetryCount - 1));
+        console.warn(`[Haven Desktop] Transient load failure (${errorCode}), retry ${_failRetryCount}/${MAX_FAIL_RETRIES} in ${delay}ms…`);
+        setTimeout(() => {
+          // The view may have been torn down (window closed, server switched,
+          // crash recovery, etc.) between scheduling and firing. Guard every
+          // hop: webContents itself becomes undefined after .destroy().
+          if (!mainWindow || mainWindow.isDestroyed?.()) return;
+          if (!view || !view.webContents) return;
+          try { if (view.webContents.isDestroyed()) return; } catch { return; }
+          try { view.webContents.loadURL(url); } catch {}
+        }, delay);
+        return;
+      }
+
+      loadResolved = true;
+      if (url !== primaryServerUrl) {
+        // A peer/secondary server failed: clean up and return to the primary view silently
+        mainWindow?.removeBrowserView(view);
+        try { view.webContents.destroy(); } catch {}
+        serverViews.delete(url);
+        serverBadgeState.delete(url);
+        knownServerUrlsByView.delete(url);
+        recomputeTaskbarBadge();
+        if (primaryServerUrl && serverViews.has(primaryServerUrl)) {
+          switchToServer(primaryServerUrl);
+          // Only show the toast for user-initiated peer connections, not for
+          // silent background preloads, which fail frequently on launch when
+          // servers are briefly unreachable and should never surface errors.
+          if (!background) {
+            const wc = serverViews.get(primaryServerUrl)?.webContents;
+            if (wc && !wc.isDestroyed()) {
+              const toastMessage = JSON.stringify(t('connection.failed'));
+              wc.executeJavaScript(`
+                if (typeof app !== 'undefined' && typeof app._showToast === 'function') {
+                  app._showToast(${toastMessage}, 'error');
+                }
+              `).catch(() => {});
+            }
+          }
+        } else {
+          showConnectionError(url);
+        }
+        return;
+      }
+      showConnectionError(url);
+    });
+
+    // A mic grant belongs to the origin it was given to (see mediaGrantOrigins).
+    view.webContents.on('did-navigate', (_e, navUrl) => forgetMediaGrantOnNavigation(view.webContents, navUrl));
+
+    // Reset retry counter once a load succeeds, so a future failure starts
+
+    // fresh and we don't burn the budget over many brief outages.
+    view.webContents.on('did-finish-load', () => {
+      _failRetryCount = 0;
+      // A mouse's back button means "previous page" to Chromium, and the
+      // page before the app is the login page: going there drops the call.
+      // With no earlier page kept there is nothing to go back to, whatever
+      // the page itself does with the button (Haven #5886).
+      try { view.webContents.navigationHistory.clear(); }
+      catch (err) { console.warn('[Haven Desktop] could not clear the page history:', err.message); }
+    });
+
+    // ── Open external links in default browser (issue #5) ──
+    // The server page stays on its own server. will-navigate covers only the
+    // top frame, so embedded players (SoundCloud, Spotify, YouTube) still
+    // load in their frames; the page itself never turns into one of them.
+    // A redirect gets the same rule, so a link on the server cannot bounce
+    // the page somewhere else. The one way out is the server's own single
+    // sign-on round trip to its identity provider (createSignInRoundTrip).
+    const signIn = createSignInRoundTrip();
+    // A view that is not on screen never opens the browser: nobody clicked
+    // anything. It is only cancelled (Haven-Desktop #71).
+    const leaveFor = (target) => { if (activeServerUrl === url) openWebLink(target); };
+    view.webContents.on('will-navigate', (event, navUrl) => {
+      const verdict = signIn.decide(navUrl, url);
+      if (verdict === 'stay') return;
+      event.preventDefault();
+      if (verdict === 'browser') leaveFor(navUrl);
+    });
+    view.webContents.on('will-redirect', (event, redirectUrl, _isInPlace, isMainFrame) => {
+      const mainFrame = event.isMainFrame ?? isMainFrame;
+      if (mainFrame === false) return;
+      const target = event.url || redirectUrl;
+      const verdict = signIn.decide(target, url, { redirect: true });
+      if (verdict === 'stay') return;
+      event.preventDefault();
+      if (verdict === 'browser') leaveFor(target);
+    });
+
+
+    // Intercept window.open → switch servers or open external.
+    // Same-origin popups (e.g. game pop-out) open in a real child window;
+    // cross-origin links go to the system browser.
+    view.webContents.setWindowOpenHandler(({ url: openUrl }) => {
+      try {
+        const parsedOpen = new URL(openUrl);
+        const parsedServer = new URL(url);
+        if (parsedOpen.origin === parsedServer.origin) {
+          // ── Issue #5306: in-app navigation for Haven message/channel links ──
+          // A `target="_blank"` link to the same Haven server (e.g. the
+          // /app.html?channel=CODE&message=ID deep links produced by
+          // "Copy link to message") was opening a fresh BrowserWindow that
+          // boots a whole second client instance.  On Linux this surfaced
+          // as launching a new haven-desktop process.  Detect Haven app
+          // URLs (path starts with /app or carries a channel= query) and
+          // dispatch an IPC the renderer can react to without a full
+          // navigation, so the existing view scrolls to the message.
+          const isHavenAppLink =
+            /^\/(app(\.html)?|c\/[A-Za-z0-9]+)/.test(parsedOpen.pathname) ||
+            parsedOpen.searchParams.has('channel') ||
+            parsedOpen.searchParams.has('message');
+          if (isHavenAppLink) {
+            const code = parsedOpen.searchParams.get('channel') || '';
+            const messageId = parsedOpen.searchParams.get('message') || '';
+            try {
+              if (code) safeSend(view.webContents, 'app:navigate-deep-link', { code, messageId, url: openUrl });
+              else view.webContents.loadURL(openUrl);
+            } catch {
+              try { view.webContents.loadURL(openUrl); } catch {}
+            }
+            return { action: 'deny' };
+          }
+          return {
+            action: 'allow',
+            overrideBrowserWindowOptions: {
+              width: 800,
+              height: 900,
+              autoHideMenuBar: true,
+              webPreferences: {
+                contextIsolation: true,
+                nodeIntegration: false,
+              }
+            }
+          };
+        }
+      } catch {}
+      handleWindowOpen(openUrl);
+      return { action: 'deny' };
+    });
+
+    // ── Auto-recover from renderer crashes ──
+    // When the BrowserView's renderer dies the screen goes blank with no
+    // automatic recovery.  Re-load the page after a short pause.
+    // Uses exponential back-off, and after exhausting retries, performs a
+    // full BrowserView tear-down + rebuild so the user never sees a
+    // permanent blank screen.
+    let _crashCount = 0;
+    const MAX_CRASH_RETRIES = 5;
+    const CRASH_WINDOW_MS  = 60000; // reset counter after 1 min of stability
+    let _crashStabilityTimer = null;
+    view.webContents.on('render-process-gone', (_e, details) => {
+      if (details.reason === 'clean-exit') return;
+      _crashCount++;
+
+      // Immediately kill the pending log-batch timer so safeSend doesn't
+      // try to IPC into the now-dead renderer frame.
+      if (_logTimer) { clearTimeout(_logTimer); _logTimer = null; _logBuf = ''; }
+
+      // Stop monitoring intervals: the renderer is dead, executing JS or
+      // querying memory on it will throw.
+      if (_memCheckInterval) { clearInterval(_memCheckInterval); _memCheckInterval = null; }
+      if (_healthCheckInterval) { clearInterval(_healthCheckInterval); _healthCheckInterval = null; }
+
+      console.warn(`[Haven Desktop] Renderer crashed (${details.reason}) for ${url} [${_crashCount}/${MAX_CRASH_RETRIES}], reloading…`);
+
+      // Clear any previous stability timer
+      if (_crashStabilityTimer) { clearTimeout(_crashStabilityTimer); _crashStabilityTimer = null; }
+
+      if (_crashCount > MAX_CRASH_RETRIES) {
+        // Nuclear recovery: tear down the BrowserView entirely and rebuild it
+        console.warn(`[Haven Desktop] Renderer crashed ${_crashCount} times, rebuilding BrowserView for ${url}`);
+        try {
+          mainWindow?.removeBrowserView(view);
+          try { view.webContents.destroy(); } catch {}
+          serverViews.delete(url);
+          // After a brief pause, rebuild
+          setTimeout(() => {
+            if (!mainWindow) return;
+            _crashCount = 0; // reset for the new view
+            switchToServer(url);
+          }, 2000);
+        } catch (e) {
+          console.error('[Haven Desktop] Nuclear recovery failed:', e.message);
+          resetToWelcome();
+        }
+        return;
+      }
+      const delay = 1500 * Math.pow(2, _crashCount - 1); // 1.5 s, 3 s, 6 s, 12 s, 24 s
+      setTimeout(() => {
+        if (!mainWindow || !serverViews.has(url)) return;
+        try { view.webContents.loadURL(buildServerAppUrl(url)); } catch {}
+      }, delay);
+      // Reset counter after a period of stability
+      _crashStabilityTimer = setTimeout(() => { _crashCount = 0; }, CRASH_WINDOW_MS);
+    });
+
+    // ── Handle renderer becoming unresponsive (OOM / infinite loop) ──
+    let _unresponsiveTimer = null;
+    view.webContents.on('unresponsive', () => {
+      if (_unresponsiveTimer) return; // already scheduled
+      console.warn(`[Haven Desktop] Renderer unresponsive for ${url}, will reload after 5 s…`);
+      _unresponsiveTimer = setTimeout(() => {
+        _unresponsiveTimer = null;
+        if (!mainWindow || !serverViews.has(url)) return;
+        try { view.webContents.loadURL(buildServerAppUrl(url)); } catch {}
+      }, 5000);
+    });
+    view.webContents.on('responsive', () => {
+      if (_unresponsiveTimer) {
+        clearTimeout(_unresponsiveTimer);
+        _unresponsiveTimer = null;
+        console.log(`[Haven Desktop] Renderer recovered for ${url}, cancelled reload`);
+      }
+    });
+
+    // ── Periodic memory monitoring ──
+    // Checks renderer memory every 30 s.  Soft DOM trim at 500 MB,
+    // hard reload only at 1536 MB with a 5 min cooldown to prevent
+    // reload loops on media-heavy channels.  Hard reload is skipped
+    // entirely when the user is in voice or screen sharing; reloading
+    // while capturing would abruptly drop the call for all participants.
+    const MEM_THRESHOLD_MB = 1536;
+    const MEM_WARN_MB      = 500;
+    const MEM_CHECK_INTERVAL = 30000;
+    const MEM_RELOAD_COOLDOWN = 300000; // 5 min between hard reloads
+    let _memCheckInterval = null;
+    let _lastMemReload = 0;           // timestamp of last memory reload
+    const _memTrend = [];           // [{ts, mb}] of the last 20 readings (~10 min)
+    const MEM_TREND_MAX = 20;
+    const _startMemCheck = () => {
+      _memCheckInterval = setInterval(async () => {
+      if (!mainWindow || !serverViews.has(url)) {
+        clearInterval(_memCheckInterval);
+        return;
+      }
+      if (activeServerUrl !== url) return; // only check active view
+      try {
+        // Use app.getAppMetrics() to find renderer memory by PID:
+        // getProcessMemoryInfo().private returns 0 on some Electron/Windows combos.
+        const rendererPid = view.webContents.getOSProcessId();
+        const allMetrics = app.getAppMetrics();
+        const proc = allMetrics.find(m => m.pid === rendererPid);
+        const memKB = proc ? (proc.memory.workingSetSize || 0) : 0;
+        const memMB = memKB / 1024;
+
+        // Track trend
+        _memTrend.push({ ts: Date.now(), mb: Math.round(memMB) });
+        if (_memTrend.length > MEM_TREND_MAX) _memTrend.shift();
+
+        if (memMB > MEM_THRESHOLD_MB) {
+          // Hard reload, but only if we haven't reloaded recently to prevent loops
+          if (Date.now() - _lastMemReload < MEM_RELOAD_COOLDOWN) {
+            console.warn(`[Haven Desktop] Memory ${Math.round(memMB)} MB: skipping reload (cooldown active), trimming DOM instead`);
+          } else {
+            // Skip hard reload if the user is in an active voice or screen share session.
+            // Reloading mid-call would abruptly kick them (and their screen share partner)
+            // without warning.  Let the soft DOM trim handle it instead.
+            let inVoice = false;
+            try {
+              // Haven's client exposes itself as window.app; the older
+              // _havenApp name never existed, so this guard always said "not
+              // in voice" and a reload could land mid-call.
+              inVoice = await view.webContents.executeJavaScript(
+                '(function(){var a=window.app||window._havenApp;return !!(a&&a.voice&&(a.voice.inVoice||a.voice.isScreenSharing));})()'
+              ).catch(() => false);
+            } catch { inVoice = false; }
+            if (inVoice) {
+              console.warn(`[Haven Desktop] Memory ${Math.round(memMB)} MB: skipping hard reload because user is in voice/screen share, trimming DOM instead`);
+            } else {
+              console.warn(`[Haven Desktop] Renderer memory ${Math.round(memMB)} MB exceeds ${MEM_THRESHOLD_MB} MB, clearing caches & reloading`);
+              _lastMemReload = Date.now();
+              try { view.webContents.session.clearCache().catch(() => {}); } catch {}
+              try { view.webContents.loadURL(buildServerAppUrl(url)); } catch {}
+              return; // skip soft trim; we're reloading
+            }
+          }
+        }
+
+        if (memMB > MEM_WARN_MB) {
+          // Soft intervention: trim excess DOM nodes + revoke blob URLs.
+          // CRITICAL: Do NOT use getBoundingClientRect() here; it forces
+          // a synchronous layout recalculation for EVERY element, which
+          // starves the renderer event loop and causes complete UI freezes.
+          try {
+            view.webContents.executeJavaScript(`
+              (function(){
+                var ct = 0;
+                var msgs = document.getElementById('messages');
+                if (msgs) {
+                  while (msgs.children.length > 200) {
+                    msgs.removeChild(msgs.firstElementChild);
+                    ct++;
+                  }
+                }
+                // Strip heavy embeds (iframes, large images) from older messages
+                if (msgs) {
+                  var old = Array.from(msgs.querySelectorAll('.link-preview-yt, .link-preview'));
+                  old.slice(0, Math.max(0, old.length - 5)).forEach(function(el) { el.remove(); });
+                }
+                if (ct) console.log('[Haven] Soft GC: trimmed ' + ct + ' old messages + embeds');
+              })()
+            `).catch(() => {});
+          } catch {}
+        }
+      } catch {}
+    }, MEM_CHECK_INTERVAL);
+    }; // end _startMemCheck
+    setTimeout(_startMemCheck, 30000); // wait 30 s before first memory check
+
+    // ── Periodic health check: detect blank screen without crash event ──
+    // Sometimes the renderer goes blank without firing 'render-process-gone'
+    // (e.g. GPU process crash, OOM).  Check if the renderer process is
+    // crashed and reload if so.  IMPORTANT: we no longer use
+    // executeJavaScript() for this: injecting JS into a renderer that's
+    // already busy/stalled blocks the main process event loop and makes
+    // the freeze WORSE.  isCrashed() is a synchronous C++ call on the
+    // main process side that doesn't touch the renderer at all.
+    let _healthCheckInterval = setInterval(() => {
+      if (!mainWindow || !serverViews.has(url)) {
+        clearInterval(_healthCheckInterval);
+        return;
+      }
+      if (activeServerUrl !== url) return; // only check the active view
+      try {
+        if (view.webContents.isCrashed()) {
+          console.warn('[Haven Desktop] Health check: renderer crashed, reloading…');
+          view.webContents.loadURL(buildServerAppUrl(url));
+        }
+      } catch {}
+    }, 30000); // check every 30 seconds
+
+    // Only open DevTools for the first server view in dev mode
+    if (IS_DEV && serverViews.size === 0) view.webContents.openDevTools({ mode: 'detach' });
+    serverViews.set(url, view);
+  }
+
+  return view;
+}
+
+// Default cap on how many secondary servers we'll pre-load in the background.
+// Each background view is a full Chromium renderer + Socket.IO connection, so
+// this is the dial that controls how memory-heavy the desktop app gets when
+// the user has lots of servers added.
+const BACKGROUND_SERVER_CAP = 8;
+
+function scheduleBackgroundServerPreload(activeServerUrl) {
+  // Off-switch: setting `backgroundServerConnections` to false disables
+  // pre-loading entirely, restoring the old lazy behavior.
+  const enabled = store.get('backgroundServerConnections');
+  if (enabled === false) return;
+
+  // Wait a few seconds so the active view's first paint isn't competing
+  // with N background renderers spinning up at the same moment.
+  setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const activeNorm = normalizeServerUrl(activeServerUrl);
+    const history = sanitizeServerHistory(store.get('serverHistory') || []);
+    const saved = [activeNorm, ...history.map(entry => entry.url)];
+    let started = 0;
+    for (const entry of history) {
+      if (started >= BACKGROUND_SERVER_CAP) break;
+      const url = entry.url;
+      if (!url || url === activeNorm || serverViews.has(url) || isHttpTwin(url, saved)) continue;
+      try {
+        ensureServerView(url, { background: true });
+        started++;
+      } catch (e) {
+        console.warn('[Haven Desktop] Background preload failed for', url, e.message);
+      }
+    }
+    if (started > 0) {
+      console.log(`[Haven Desktop] Pre-loaded ${started} background server view${started === 1 ? '' : 's'} for unread badges`);
+    }
+  }, 4000);
+}
+
+function handleWindowOpen(url) {
+  try {
+    const parsed = new URL(url);
+    if (/^https?:$/.test(parsed.protocol)) {
+      // Only switch within the app for servers already registered in this session.
+      // Unknown external URLs (including friends' Haven servers) open in the system
+      // browser; trying to auto-load them risks a failed navigation that resets the session.
+      const normalizedUrl = normalizeServerUrl(url);
+      // Switching marks a server connected, so a removed one is not brought
+      // back this way.
+      if (serverViews.has(normalizedUrl) && readServerList(store).history.some(h => h.url === normalizedUrl)) {
+        switchToServer(normalizedUrl);
+        return;
+      }
+    }
+  } catch { /* not a URL */ }
+  if (typeof url === 'string' && /^https?:\/\//i.test(url)) shell.openExternal(url);
+}
+
+// A window a server page opened (a picture, a game, the Steam or Spotify
+// sign-in round trip) has no preload and no bridge, so it may browse the
+// web, but nothing else: no other schemes, and no further windows of its
+// own (those go to the system browser).
+function guardServerPopup(contents) {
+  const webOnly = (event, target) => {
+    let parsed = null;
+    try { parsed = new URL(String(target)); } catch { /* not a URL: blocked below */ }
+    if (parsed && (parsed.protocol === 'https:' || parsed.protocol === 'http:')) return;
+    event.preventDefault();
+  };
+  contents.on('will-navigate', (event, target) => webOnly(event, target));
+  contents.on('will-redirect', (event, target) => webOnly(event, event.url || target));
+  contents.on('will-attach-webview', (event) => event.preventDefault());
+  contents.setWindowOpenHandler(({ url: target }) => {
+    openWebLink(target);
+    return { action: 'deny' };
+  });
+}
+
+function getServerUrlForContents(contents) {
+
+  for (const [url, view] of serverViews) {
+    if (view.webContents === contents) return url;
+  }
+  try {
+    const normalized = normalizeServerUrl(contents?.getURL());
+    if (normalized && serverViews.has(normalized)) return normalized;
+  } catch {}
+  return null;
+}
+
+function getTrustedServerUrlForFrame(contents, frame, { active = false } = {}) {
+  for (const [url, view] of serverViews) {
+    if (view.webContents !== contents) continue;
+    if (!isTrustedMainFrame(contents, frame, url)) return null;
+    if (active && url !== activeServerUrl) return null;
+    return url;
+  }
+  return null;
+}
+
+/** Who may read the user's server list, and the badges and mutes that name
+ *  the servers in it: the app's own screens and the server page on screen.
+ *  A hidden server page is told to read it again once it is shown. */
+function serverListReader(e) {
+  return fromAppScreen(e) || fromActiveServer(e);
+}
+
+function serverBadgePayload() {
+  return { badges: Object.fromEntries(serverBadgeState), names: buildServerNameMap() };
+}
+
+function sendServerBadges(contents) {
+  safeSend(contents, 'server-badge-update', serverBadgePayload());
+}
+
+// Windows a server page opened (a picture, a game, a sign-in round trip),
+// with the server they belong to.
+const serverPopupOwners = new WeakMap();
+// Server views given the mic or camera while shown, with the origin it was
+// for. Cleared when the view's page moves to another origin.
+const mediaGrantOrigins = new WeakMap();
+
+function forgetMediaGrantOnNavigation(contents, url) {
+  const granted = mediaGrantOrigins.get(contents);
+  if (granted && getHttpOrigin(url) !== granted) mediaGrantOrigins.delete(contents);
+}
+
+/** Who is asking for a browser permission (see permissionAllowed). */
+function permissionRequester(contents) {
+  if (!contents || contents.isDestroyed?.()) return null;
+  for (const [url, view] of serverViews) {
+    if (view.webContents === contents) {
+      return {
+        kind: 'server',
+        origin: getHttpOrigin(url),
+        active: url === activeServerUrl,
+        mediaOrigin: mediaGrantOrigins.get(contents) || null,
+      };
+    }
+  }
+  const owner = serverPopupOwners.get(contents);
+  if (owner) return { kind: 'popup', origin: getHttpOrigin(owner) };
+  if (contents === contentsOf(welcomeWindow) || contents === contentsOf(mainWindow)) return { kind: 'local' };
+  return null;
+}
+
+// The language is the welcome screen's, or the shown server page's, to set.
+function isLanguageSenderAllowed(e) {
+  return fromWelcomeScreen(e) || fromActiveServer(e);
+}
+
+function getActiveContents() {
+  if (activeServerUrl && serverViews.has(activeServerUrl))
+    return serverViews.get(activeServerUrl).webContents;
+  return mainWindow?.webContents || welcomeWindow?.webContents || null;
+}
+
+/**
+ * Guard against "Render frame was disposed before WebFrameMain could be
+ * accessed".  Checking `wc.mainFrame` before `send()` prevents Electron's
+ * native C++ layer from even attempting the IPC send to a disposed frame.
+ * The try/catch stays as a safety net for the remaining race window.
+ */
+function safeSend(wc, channel, ...args) {
+  try {
+    if (!wc || wc.isDestroyed()) return;
+    const frame = wc.mainFrame;
+    if (!frame) return;
+    // Use the WebFrameMain directly; it avoids the extra webContents dispatch
+    // layer that logs a native error even when we catch the JS exception.
+    frame.send(channel, ...args);
+  } catch { /* frame disposed between check and send; harmless */ }
+}
+
+// ── Notification Badge ───────────────────────────────────────
+
+function createBadgeIcon() {
+  // 32×32 renders sharply on HiDPI Windows taskbars.
+  // Shape: pointy-top hexagon matching Haven's app icon.
+  // Fill: diagonal gradient #8b6ff0 → #6b4fdb (same as the SVG brand mark).
+  // Ring: 2px light-lavender edge echoing the hex outline stroke.
+  // Mark: white "!" so it reads clearly as a notification badge.
+  const s = 32;
+  const buf = Buffer.alloc(s * s * 4, 0);
+  const cx = s / 2 - 0.5, cy = s / 2 - 0.5;  // sub-pixel center
+  const R     = 14.5;  // outer circumradius
+  const fillR = R - 2; // inner fill radius (= ring width of 2px)
+
+  // Pointy-top hex: first vertex at top (image coords with y-down axis).
+  // Angles: π/2, π/2+π/3, π/2+2π/3, …
+  const uv = Array.from({ length: 6 }, (_, k) => {
+    const a = Math.PI / 2 + k * Math.PI / 3;
+    return [Math.cos(a), -Math.sin(a)]; // y-down: negate sin
+  });
+
+  // CW point-in-regular-hexagon test (cross product, all edges must have cross ≤ 0).
+  function inHex(px, py, r) {
+    const x = px - cx, y = py - cy;
+    for (let k = 0; k < 6; k++) {
+      const ax = uv[k][0] * r,       ay = uv[k][1] * r;
+      const bx = uv[(k + 1) % 6][0] * r, by = uv[(k + 1) % 6][1] * r;
+      if ((bx - ax) * (y - ay) - (by - ay) * (x - ax) > 0) return false;
+    }
+    return true;
+  }
+
+  for (let y = 0; y < s; y++) {
+    for (let x = 0; x < s; x++) {
+      const px = x + 0.5, py = y + 0.5; // test pixel centre
+      if (!inHex(px, py, R)) continue;  // transparent outside hex
+
+      const i = (y * s + x) * 4;
+      if (!inHex(px, py, fillR)) {
+        // Ring: soft lavender-white, echoes the hex outline in the app icon
+        buf[i] = 220; buf[i + 1] = 210; buf[i + 2] = 248; buf[i + 3] = 255;
+      } else {
+        // Gradient fill: #8b6ff0 (top-left) → #6b4fdb (bottom-right)
+        const t = Math.max(0, Math.min(1, ((px - cx) + (py - cy)) / (fillR * 2) + 0.5));
+        buf[i]     = Math.round(0x8b + t * (0x6b - 0x8b)); // 139 → 107
+        buf[i + 1] = Math.round(0x6f + t * (0x4f - 0x6f)); // 111 →  79
+        buf[i + 2] = Math.round(0xf0 + t * (0xdb - 0xf0)); // 240 → 219
+        buf[i + 3] = 255;
+      }
+    }
+  }
+
+  // White "!" centered at x=15.5 (4px wide: px 14-17).
+  // Bar: y 8-17 (10px).  Gap: y 18-21.  Dot: y 22-24 (3px).
+  const paint = (px, py) => {
+    if (px < 0 || px >= s || py < 0 || py >= s) return;
+    const idx = (py * s + px) * 4;
+    if (buf[idx + 3] === 0) return; // don't bleed outside hex
+    buf[idx] = buf[idx + 1] = buf[idx + 2] = 255; buf[idx + 3] = 255;
+  };
+  for (let py = 8;  py <= 17; py++) for (let px = 14; px <= 17; px++) paint(px, py);
+  for (let py = 22; py <= 24; py++) for (let px = 14; px <= 17; px++) paint(px, py);
+
+  return nativeImage.createFromBuffer(buf, { width: s, height: s });
+}
+
+function setNotificationBadge() {
+  setTrayUnread(true);
+  if (!mainWindow) return;
+  // Overlay/dock badge: always show when there are unreads (even if window is focused:
+  // the user may be in a different channel and hasn't seen the new message yet).
+  if (process.platform === 'win32' && badgeIcon) mainWindow.setOverlayIcon(badgeIcon, t('badge.newMessages'));
+  if (process.platform === 'darwin' || process.platform === 'linux') app.setBadgeCount(1);
+  // No flash here. Every server view re-reports its unread state as things
+  // change, so flashing on it kept the taskbar blinking for unreads nobody
+  // meant to read, even with pop-ups set to Never. The flash comes with a
+  // notification instead (see 'notify'), which already honours mutes, the
+  // DM and mention switches and the pop-up limit. (Haven #5693)
+}
+
+function clearNotificationBadge() {
+  setTrayUnread(false);
+  if (!mainWindow) return;
+  if (process.platform === 'win32') mainWindow.setOverlayIcon(null, '');
+  if (process.platform === 'darwin' || process.platform === 'linux') app.setBadgeCount(0);
+  mainWindow.flashFrame(false);
+}
+
+// Compute and apply the taskbar overlay badge based on serverBadgeState,
+// filtered so a server's unreads only count if at least one open view's
+// sidebar can display that server (its own origin counts). Without this
+// filter, background-preloaded BrowserViews fire the badge for servers
+// the user has no visible icon for, producing a "phantom" taskbar badge
+// with no in-app indicator anywhere. (#5269)
+function recomputeTaskbarBadge() {
+  // Union of every open view's known URL set (each view contributes its
+  // own origin + every remote icon it currently shows). A badge counts
+  // only if its server URL is in this union.
+  const visible = new Set();
+  for (const set of knownServerUrlsByView.values()) {
+    for (const u of set) visible.add(u);
+  }
+  let anyVisibleUnread = false;
+  for (const [url, hasUnread] of serverBadgeState) {
+    if (!hasUnread) continue;
+    // If no view has reported its known URLs yet (early startup before
+    // any renderer has finished its first sidebar render), fall back to
+    // the legacy behaviour so the badge still works.
+    if (knownServerUrlsByView.size === 0 || visible.has(url)) {
+      anyVisibleUnread = true;
+      break;
+    }
+  }
+  if (anyVisibleUnread) setNotificationBadge();
+  else clearNotificationBadge();
+}
+
+// ═══════════════════════════════════════════════════════════
+// Application Menu
+// ═══════════════════════════════════════════════════════════
+
+// Build a custom app menu that routes Reload / DevTools to the active
+// BrowserView instead of the (empty) mainWindow webContents.
+function buildLanguageSubmenu() {
+  const languagePreference = store.get('language') || SYSTEM_LANGUAGE;
+  return [
+    {
+      label: t('language.automatic'),
+      type: 'radio',
+      checked: languagePreference === SYSTEM_LANGUAGE,
+      click: () => setLanguagePreference(SYSTEM_LANGUAGE),
+    },
+    { type: 'separator' },
+    ...SUPPORTED_LOCALES.map(locale => ({
+      label: locale.name,
+      type: 'radio',
+      checked: languagePreference === locale.code,
+      click: () => setLanguagePreference(locale.code),
+    })),
+  ];
+}
+
+// Help > Check for Updates, also on the tray menu. The result comes back
+// through the auto-updater events above. (Haven #5627)
+function showUpdateBox(type, message) {
+  const parent = (mainWindow && !mainWindow.isDestroyed()) ? mainWindow
+    : (welcomeWindow && !welcomeWindow.isDestroyed()) ? welcomeWindow : null;
+  const opts = { type, title: t('menu.checkForUpdates'), message, buttons: [t('update.ok')] };
+  try { parent ? dialog.showMessageBox(parent, opts) : dialog.showMessageBox(opts); } catch {}
+}
+
+// Every open server page and the welcome window get update news, not just
+// the active page: a server opened in the background, or one you switch to
+// later, shows the banner too. (#63)
+function sendToUpdatePages(channel, ...args) {
+  for (const view of serverViews.values()) safeSend(view?.webContents, channel, ...args);
+  if (welcomeWindow && !welcomeWindow.isDestroyed()) safeSend(welcomeWindow.webContents, channel, ...args);
+}
+
+function runBackgroundUpdateCheck() {
+  if (!autoUpdater || !updateState.shouldCheck()) return;
+  autoUpdater.checkForUpdates().catch(() => { /* logged by the updater's error handler */ });
+}
+
+function checkForUpdatesFromMenu() {
+  if (!autoUpdater || !app.isPackaged) {
+    showUpdateBox('info', app.isPackaged
+      ? t('update.unavailable')
+      : t('update.notPackaged'));
+    return;
+  }
+  _manualUpdateCheck = true;
+  autoUpdater.checkForUpdates().catch(() => { /* reported by the error handler */ });
+}
+
+function buildAppMenu() {
+  const isMac = process.platform === 'darwin';
+  return Menu.buildFromTemplate([
+    ...(isMac ? [{ role: 'appMenu' }] : []),
+    {
+      label: t('menu.edit'),
+      submenu: [
+        { label: t('menu.undo'), role: 'undo' },
+        { label: t('menu.redo'), role: 'redo' },
+        { type: 'separator' },
+        { label: t('menu.cut'), role: 'cut' },
+        { label: t('menu.copy'), role: 'copy' },
+        { label: t('menu.paste'), role: 'paste' },
+        { label: t('menu.selectAll'), role: 'selectAll' },
+      ],
+    },
+    {
+      label: t('menu.view'),
+      submenu: [
+        {
+          label: t('menu.reload'),
+          accelerator: 'CmdOrCtrl+R',
+          click() { getActiveContents()?.reload(); },
+        },
+        {
+          label: t('menu.forceReload'),
+          accelerator: 'CmdOrCtrl+Shift+R',
+          click() { getActiveContents()?.reloadIgnoringCache(); },
+        },
+        {
+          label: t('menu.toggleDeveloperTools'),
+          accelerator: isMac ? 'Alt+Cmd+I' : 'Ctrl+Shift+I',
+          click() { getActiveContents()?.toggleDevTools(); },
+        },
+        { type: 'separator' },
+        { label: t('menu.toggleFullScreen'), role: 'togglefullscreen' },
+        { type: 'separator' },
+        {
+          label: t('menu.resetWelcome'),
+          accelerator: 'CmdOrCtrl+Shift+Home',
+          click() { if (mainWindow) resetToWelcome(true); },
+        },
+      ],
+    },
+    {
+      label: t('menu.window'),
+      submenu: [
+        { label: t('menu.minimize'), role: 'minimize' },
+        ...(isMac
+          ? [
+              { label: t('menu.zoom'), role: 'zoom' },
+              { type: 'separator' },
+              { label: t('menu.bringAllToFront'), role: 'front' },
+            ]
+          : [{ label: t('menu.close'), role: 'close' }]),
+      ],
+    },
+    {
+      label: t('menu.language'),
+      submenu: buildLanguageSubmenu(),
+    },
+    {
+      label: t('menu.help'),
+      role: 'help',
+      submenu: [
+        { label: t('menu.checkForUpdates'), click: () => checkForUpdatesFromMenu() },
+        { type: 'separator' },
+        { label: t('menu.version', { version: app.getVersion() }), enabled: false },
+      ],
+    },
+  ]);
+}
+
+// ═══════════════════════════════════════════════════════════
+// System Tray
+// ═══════════════════════════════════════════════════════════
+
+function createTray() {
+  if (tray && !tray.isDestroyed()) {
+    rebuildTrayMenu();
+    return;
+  }
+
+  let icon;
+  try {
+    const raw = nativeImage.createFromPath(ICON_PATH);
+    // DPI-aware tray icon sizing (issue #4)
+    const sf = screen.getPrimaryDisplay().scaleFactor || 1;
+    if (process.platform === 'win32') {
+      const s = Math.round(16 * sf);
+      icon = raw.resize({ width: s, height: s });
+    } else if (process.platform === 'linux') {
+      const s = Math.round(24 * sf);
+      icon = raw.resize({ width: s, height: s });
+    } else {
+      icon = raw.resize({ width: 22, height: 22 }); // macOS template size
+    }
+  } catch {
+    return; // icon asset may not exist yet in dev
+  }
+
+  trayIconPlain = icon;
+  trayIconUnread = withUnreadDot(icon);
+  tray = new Tray(trayUnread && trayIconUnread ? trayIconUnread : icon);
+  tray.setToolTip(trayUnread ? `Haven Desktop: ${t('badge.newMessages')}` : 'Haven Desktop');
+  rebuildTrayMenu();
+  // Refresh tray menu periodically so server status stays current
+  if (!trayRefreshTimer) trayRefreshTimer = setInterval(rebuildTrayMenu, 60000);
+
+  tray.on('click', () => {
+    const win = mainWindow || welcomeWindow;
+    if (win) { win.isVisible() ? win.focus() : win.show(); }
+  });
+}
+
+// The tray icon with a red dot in its corner, shown while there are unread
+// messages. With the window hidden to the tray there is no taskbar button to
+// carry the badge, so the tray icon is the only place left to show it.
+function withUnreadDot(icon) {
+  try {
+    const { width, height } = icon.getSize();
+    const buf = Buffer.from(icon.toBitmap());
+    if (!width || !height || buf.length !== width * height * 4) return null;
+    const r = Math.max(3, Math.round(width * 0.25));
+    const cx = width - r - 0.5, cy = height - r - 0.5;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const d = Math.hypot(x - cx, y - cy);
+        if (d > r) continue;
+        const i = (y * width + x) * 4;
+        // Bitmaps are BGRA. A white rim keeps the dot apart from the icon.
+        const rim = d > r - 1;
+        buf[i] = rim ? 255 : 0x3c; buf[i + 1] = rim ? 255 : 0x4c; buf[i + 2] = rim ? 255 : 0xe7; buf[i + 3] = 255;
+      }
+    }
+    return nativeImage.createFromBitmap(buf, { width, height });
+  } catch (err) {
+    console.warn('[Haven Desktop] could not draw the unread tray icon:', err.message);
+    return null;
+  }
+}
+
+function setTrayUnread(unread) {
+  trayUnread = !!unread;
+  if (!tray || tray.isDestroyed() || !trayIconPlain) return;
+  tray.setImage(trayUnread && trayIconUnread ? trayIconUnread : trayIconPlain);
+  tray.setToolTip(trayUnread ? `Haven Desktop: ${t('badge.newMessages')}` : 'Haven Desktop');
+}
+
+// On Linux the overlay needs X11 to stay above other windows and open where
+// it was left: a native Wayland window may do neither.
+function voiceOverlayNeedsX11() {
+  return isWaylandSession() && !process.argv.some(a => a === '--ozone-platform=x11');
+}
+
+// The way back for a window on a monitor nobody can see, such as a VR headset
+// that is off (Haven #5847). It stays listed as a monitor, so only the user can
+// say the window is lost.
+function bringWindowToMainScreen() {
+  const win = mainWindow || welcomeWindow;
+  if (!win || win.isDestroyed()) return;
+  if (win.isFullScreen()) win.setFullScreen(false);
+  if (win.isMaximized()) win.unmaximize();
+  win.setBounds(centeredIn(win.getBounds(), screen.getPrimaryDisplay().workArea));
+  win.show();
+  win.focus();
+}
+
+function rebuildTrayMenu() {
+  if (!tray || tray.isDestroyed()) return;
+  const running = serverManager?.isRunning();
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: `Haven Desktop v${app.getVersion()}`, enabled: false },
+    { label: t('menu.checkForUpdates'), click: () => checkForUpdatesFromMenu() },
+    { type: 'separator' },
+    { label: t('tray.moveToMainScreen'), click: () => bringWindowToMainScreen() },
+    { label: t('tray.show'), click: () => { (mainWindow || welcomeWindow)?.show(); (mainWindow || welcomeWindow)?.focus(); } },
+    // The same setting as Settings > Desktop App, here where people look for it.
+    { label: t('tray.keepInTray'), type: 'checkbox', checked: !!store.get('minimizeToTray'), click: (item) => store.set('minimizeToTray', !!item.checked) },
+    ...(mainWindow ? [{
+      label: (activeServerUrl && primaryServerUrl && activeServerUrl !== primaryServerUrl)
+        ? t('tray.backToServer')
+        : t('tray.changeServer'),
+      click: () => {
+        if (activeServerUrl && primaryServerUrl && activeServerUrl !== primaryServerUrl) {
+          const secondaryUrl = activeServerUrl;
+          const secondaryView = serverViews.get(secondaryUrl);
+          if (secondaryView) {
+            mainWindow?.removeBrowserView(secondaryView);
+            try { secondaryView.webContents.destroy(); } catch {}
+            serverViews.delete(secondaryUrl);
+            serverBadgeState.delete(secondaryUrl);
+            knownServerUrlsByView.delete(secondaryUrl);
+            recomputeTaskbarBadge();
+          }
+          switchToServer(primaryServerUrl);
+        } else {
+          resetToWelcome(true);
+        }
+      },
+    }] : []),
+    { type: 'separator' },
+    ...(voiceOverlay ? [{ label: t('voiceOverlay.title'), submenu: voiceOverlay.menu({ waylandNote: voiceOverlayNeedsX11() }) }] : []),
+    { label: t('menu.language'), submenu: buildLanguageSubmenu() },
+    { type: 'separator' },
+    { label: `${running ? '●' : '○'} ${running ? t('tray.serverRunning') : t('tray.serverStopped')}`, enabled: false },
+    { type: 'separator' },
+    { label: t('tray.quit'), click: () => { app.isQuitting = true; app.quit(); } },
+  ]));
+}
+
+// ═══════════════════════════════════════════════════════════
+// Screen-Share Handler  (per-app audio magic)
+// ═══════════════════════════════════════════════════════════
+//
+// When the Haven web app calls navigator.mediaDevices.getDisplayMedia(),
+// Electron's handler fires. A sandboxed local window shows the available
+// sources and audio apps, then native per-app audio starts for the selection.
+// ───────────────────────────────────────────────────────────
+
+function getScreenPickerCopy() {
+  const keys = [
+    'title', 'subtitle', 'portalSubtitle', 'systemPortal', 'screens', 'windows',
+    'audio', 'noAudio', 'systemAudio', 'applicationAudio', 'noApplications',
+    'systemUnavailable', 'applicationUnavailable', 'audioUnavailable', 'audioModuleOutdated', 'videoEncoder', 'hardwareH264',
+    'automaticEncoder', 'unavailable', 'hardwareEncodingAvailable',
+    'hardwareEncodingUnavailable', 'h265Available',
+    'h265Unavailable', 'silent', 'silentDescription', 'noPreview', 'cancel',
+    'share', 'continue', 'windowAudio', 'windowAudioFrom', 'windowAudioFallbackSystem',
+    'windowAudioFallbackNone',
+  ];
+  return Object.fromEntries(keys.map(key => [key, t(`screenPicker.${key}`)]));
+}
+
+function requestScreenPicker(targetContents, pickerData, { requestFrame = null, signal = null } = {}) {
+  cancelActiveScreenPicker?.();
+
+  return new Promise(resolve => {
+    let settled = false;
+    let timeoutId;
+    const requestId = pickerData.requestId;
+    const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+    const pickerFile = path.join(__dirname, '..', 'renderer', 'screen-picker.html');
+    const pickerUrl = pathToFileURL(pickerFile).href;
+    const pickerWindow = new BrowserWindow({
+      width: 960,
+      height: 760,
+      minWidth: 680,
+      minHeight: 560,
+      show: false,
+      autoHideMenuBar: true,
+      backgroundColor: '#090b12',
+      title: t('screenPicker.title'),
+      icon: ICON_PATH,
+      ...(parent ? { parent, modal: true } : {}),
+      webPreferences: {
+        preload: path.join(__dirname, 'screen-picker-preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        devTools: IS_DEV,
+      },
+    });
+    const pickerContents = pickerWindow.webContents;
+
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      if (cancelActiveScreenPicker === ownerGone) cancelActiveScreenPicker = null;
+      signal?.removeEventListener('abort', ownerGone);
+      ipcMain.removeListener('screen-picker:result', handler);
+      targetContents.removeListener('destroyed', ownerGone);
+      targetContents.removeListener('render-process-gone', ownerGone);
+      targetContents.removeListener('did-start-navigation', ownerNavigated);
+      pickerWindow.removeListener('closed', ownerGone);
+      if (!pickerWindow.isDestroyed()) pickerWindow.destroy();
+      resolve(value);
+    };
+    const ownerGone = () => finish({ cancelled: true, requestId });
+    const ownerNavigated = (_event, _url, isInPlace, isMainFrame) => {
+      if (!isInPlace && isMainFrame !== false) ownerGone();
+    };
+    const handler = (event, result = {}) => {
+      if (event.sender !== pickerContents || event.senderFrame !== pickerContents.mainFrame) return;
+      if (result?.requestId !== requestId) return;
+      if (requestFrame && (requestFrame.isDestroyed() || requestFrame !== targetContents.mainFrame)) {
+        ownerGone();
+        return;
+      }
+      finish(result);
+    };
+
+    cancelActiveScreenPicker = ownerGone;
+    timeoutId = setTimeout(ownerGone, 60000);
+    ipcMain.on('screen-picker:result', handler);
+    targetContents.once('destroyed', ownerGone);
+    targetContents.once('render-process-gone', ownerGone);
+    targetContents.on('did-start-navigation', ownerNavigated);
+    signal?.addEventListener('abort', ownerGone, { once: true });
+    pickerWindow.on('closed', ownerGone);
+    pickerContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    pickerContents.on('will-navigate', (event, url) => {
+      if (url !== pickerUrl) event.preventDefault();
+    });
+    pickerContents.once('did-finish-load', () => {
+      if (settled) return;
+      pickerContents.send('screen-picker:data', {
+        ...pickerData,
+        copy: getScreenPickerCopy(),
+        locale: currentLocale,
+        direction: getLocaleMetadata(currentLocale).direction,
+      });
+    });
+    pickerWindow.once('ready-to-show', () => {
+      if (!settled) pickerWindow.show();
+    });
+
+    if (targetContents.isDestroyed() || requestFrame?.isDestroyed() || signal?.aborted) {
+      ownerGone();
+      return;
+    }
+    pickerWindow.loadFile(pickerFile).catch(err => {
+      console.warn(`[ScreenShare] trusted picker failed to load: ${err.message}`);
+      ownerGone();
+    });
+  });
+}
+
+function prepareStandardScreenShare(targetContents, requestFrame, data) {
+  return new Promise(resolve => {
+    let settled = false;
+    let timeoutId;
+    const finish = (value, cancelRenderer = false) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      ipcMain.removeListener('screen:prepare-share-result', handler);
+      targetContents.removeListener('destroyed', ownerGone);
+      targetContents.removeListener('render-process-gone', ownerGone);
+      targetContents.removeListener('did-start-navigation', ownerNavigated);
+      if (cancelRenderer) {
+        try {
+          if (!requestFrame?.isDestroyed()) {
+            requestFrame.send('screen:prepare-share-cancel', { requestId: data.requestId });
+          }
+        } catch {}
+      }
+      resolve(value);
+    };
+    const ownerGone = () => finish({ cancelled: true, audioReady: false }, true);
+    const ownerNavigated = (_event, _url, isInPlace, isMainFrame) => {
+      if (!isInPlace && isMainFrame !== false) ownerGone();
+    };
+    const handler = (event, result = {}) => {
+      if (event.sender !== targetContents || event.senderFrame !== requestFrame) return;
+      if (!getTrustedServerUrlForFrame(event.sender, event.senderFrame, { active: true })) {
+        ownerGone();
+        return;
+      }
+      if (result?.requestId !== data.requestId) return;
+      finish({ cancelled: false, audioReady: result.audioReady === true });
+    };
+
+    timeoutId = setTimeout(ownerGone, 12000);
+    ipcMain.on('screen:prepare-share-result', handler);
+    targetContents.once('destroyed', ownerGone);
+    targetContents.once('render-process-gone', ownerGone);
+    targetContents.on('did-start-navigation', ownerNavigated);
+    if (targetContents.isDestroyed() || requestFrame?.isDestroyed() ||
+        requestFrame !== targetContents.mainFrame) {
+      ownerGone();
+      return;
+    }
+    try {
+      requestFrame.send('screen:prepare-share', data);
+    } catch (err) {
+      console.warn(`[ScreenShare] renderer preparation failed: ${err.message}`);
+      ownerGone();
+    }
+  });
+}
+
+function registerScreenShareHandler() {
+  // ── Resolve the user's picker selection at attach time ──
+  // The desktopCapturer source IDs are not stable: between the moment the
+  // picker opened and the moment the renderer accepts the stream, Windows
+  // can re-enumerate and the original ID may no longer exist (issue #184).
+  // Re-enumerate, but accept only an exact or unambiguous equivalent source.
+  async function resolveSelectedSource(originalSources, requestedId) {
+    const original = originalSources.find(source => source.id === requestedId);
+    if (!original) return null;
+
+    let fresh;
+    try {
+      fresh = await desktopCapturer.getSources({
+        types: ['window', 'screen'],
+        thumbnailSize: { width: 0, height: 0 },
+        fetchWindowIcons: false,
+      });
+    } catch (err) {
+      console.warn(`[ScreenShare] re-enumeration failed: ${err.message}`);
+      return null;
+    }
+
+    return resolveRefreshedSource(originalSources, fresh, requestedId);
+  }
+
+  session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    let callbackUsed = false;
+    const safeCallback = (payload) => {
+      if (callbackUsed) {
+        console.warn('[ScreenShare] callback already used; ignoring duplicate invoke');
+        return;
+      }
+      callbackUsed = true;
+      try {
+        callback(payload);
+      } catch (err) {
+        // Electron can throw after rejecting a request without a video source,
+        // or when the requesting frame disappears before consent completes.
+        console.warn('[ScreenShare] display request callback:', err.message);
+      }
+    };
+
+    const requestFrame = request?.frame;
+    const targetContents = requestFrame && !requestFrame.isDestroyed()
+      ? webContents.fromFrame(requestFrame)
+      : null;
+    if (!getTrustedServerUrlForFrame(targetContents, requestFrame, { active: true })) {
+      console.warn('[ScreenShare] rejected display capture from an untrusted frame');
+      safeCallback({});
+      return;
+    }
+
+    if (screenShareRequestInProgress) {
+      safeCallback({});
+      return;
+    }
+    screenShareRequestInProgress = true;
+
+    try {
+      // Video sources
+      let sources;
+      const wayland = isWaylandSession();
+      try {
+        sources = await desktopCapturer.getSources({
+          types: ['window', 'screen'],
+          thumbnailSize: { width: 320, height: 180 },
+          fetchWindowIcons: true,
+        });
+      } catch (err) {
+        if (wayland) {
+          console.warn(`[ScreenShare] Wayland portal source enumeration failed: ${err.message}`);
+          safeCallback({});
+          return;
+        }
+        // Some Windows builds intermittently fail WGC thumbnail startup
+        // with E_INVALIDARG. Retry without thumbnails so the picker can open.
+        console.warn(`[ScreenShare] getSources(thumbnails) failed: ${err.message}; retrying without thumbnails`);
+        try {
+          sources = await desktopCapturer.getSources({
+            types: ['window', 'screen'],
+            thumbnailSize: { width: 0, height: 0 },
+            fetchWindowIcons: false,
+          });
+        } catch (err2) {
+          // On Linux the system's own share prompt (the desktop portal) runs
+          // first, and closing it rejects here. That is a cancel, not an
+          // error, and must never take the app down with it (#50).
+          console.warn(`[ScreenShare] getSources failed again: ${err2.message}; treating as cancelled`);
+          safeCallback({});
+          return;
+        }
+      }
+
+      // Haven's own window is worth listing too, if only to debug a stream
+      // (#5604). Window enumeration on some setups leaves out the app doing
+      // the capturing, so it is added by hand from the window's own media
+      // source id, with a fresh capture of the page as its preview. It goes
+      // into the raw list so the attach-time lookup finds it by id as well.
+      if (wayland && sources.length === 0) {
+        console.warn('[ScreenShare] the Wayland portal returned no capture source');
+        safeCallback({});
+        return;
+      }
+      let ownSourceId = null;
+      try {
+        if (!wayland && mainWindow && !mainWindow.isDestroyed()) {
+          const ownId = mainWindow.getMediaSourceId();
+          ownSourceId = ownId || null;
+          if (ownId && !sources.some(s => s.id === ownId)) {
+            let thumbnail = null;
+            try {
+              const shot = await mainWindow.capturePage();
+              if (shot && !shot.isEmpty()) thumbnail = shot.resize({ width: 320 });
+            } catch { /* no preview; the name still identifies it */ }
+            sources.push({ id: ownId, name: mainWindow.getTitle() || 'Haven', thumbnail, appIcon: null, display_id: '' });
+          }
+        }
+      } catch (err) {
+        console.warn(`[ScreenShare] could not add Haven's own window: ${err.message}`);
+      }
+
+      // Audio-producing applications (native addon)
+      let audioApps = [];
+      // An audio module compiled before per-app identities existed (a copy run
+      // from source that was not rebuilt after updating) lists apps without
+      // one. Those cannot be captured safely, so they are left out, but the
+      // picker says why instead of claiming nothing is playing.
+      let audioModuleOutdated = false;
+      try {
+        const listed = audioCapture.getAudioApplications().filter(app =>
+          Number.isSafeInteger(app?.pid) && app.pid > 0 && app.pid !== process.pid
+        );
+        audioApps = listed.filter(app => typeof app.identity === 'string' && app.identity.length > 0);
+        if (listed.length > 0 && audioApps.length === 0) {
+          audioModuleOutdated = true;
+          console.warn('[ScreenShare] the native audio module is out of date (no app identities); rebuild it with Setup.bat or npm run build:native:local');
+        }
+      }
+      catch (err) { console.warn('[ScreenShare] audio app enumeration failed:', err.message); }
+
+      const nativeAudioAvailable = audioCapture.isSupported();
+      const nativeSystemAudio = nativeAudioAvailable &&
+        (process.platform === 'win32' || process.platform === 'linux');
+      const audioCapabilities = {
+        application: nativeAudioAvailable,
+        systemNative: nativeSystemAudio,
+        system: nativeSystemAudio,
+        nativeAvailable: nativeAudioAvailable,
+        moduleOutdated: audioModuleOutdated,
+      };
+
+      // The shared window's own audio (#5760): which process is behind each
+      // window, playing or not. Windows only; elsewhere the list is empty.
+      let windowAudio = {};
+      let capturableApps = audioApps;
+      if (process.platform === 'win32' && nativeAudioAvailable) {
+        const handles = sources.map(s => windowHandleOf(s.id)).filter(Boolean);
+        const paired = pairWindowAudio(sources, audioApps, audioCapture.getWindowProcesses(handles));
+        windowAudio = paired.windowAudio;
+        capturableApps = paired.capturable;
+      }
+
+      const sourceData = sources.map(s => ({
+        id:         s.id,
+        name:       s.name,
+        thumbnail:  (s.thumbnail && !s.thumbnail.isEmpty()) ? s.thumbnail.toDataURL() : null,
+        appIcon:    s.appIcon ? s.appIcon.toDataURL() : null,
+        display_id: s.display_id,
+      }));
+      console.log(`[ScreenShare] source enumeration complete: ${sourceData.length} source(s)`);
+
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const videoEncoder = {
+        preference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
+        hardwareAvailable: hardwareVideoEncodingAvailable,
+        hardwareStatus: hardwareVideoEncodingStatus,
+        platform: process.platform,
+      };
+      const pickerData = {
+        requestId,
+        sources: sourceData,
+        audioApps,
+        audioCapabilities,
+        portalOnly: wayland && sourceData.length === 1,
+        videoEncoder,
+        windowAudio,
+        audioMode: normalizeAudioMode(store.get('screenShareAudioMode')),
+      };
+
+      const result = await requestScreenPicker(targetContents, pickerData, { requestFrame });
+
+      if (!result || result.cancelled) { safeCallback({}); return; }
+      if (!getTrustedServerUrlForFrame(targetContents, requestFrame, { active: true })) {
+        console.warn('[ScreenShare] requesting frame changed while the picker was open');
+        safeCallback({});
+        return;
+      }
+      store.set(
+        'videoEncoderPreference',
+        normalizeVideoEncoderPreference(result.videoEncoderPreference)
+      );
+      // The audio mode is remembered; one particular app picked from the
+      // list is not (its process is gone next time).
+      if (['window', 'system', 'none'].includes(result.audioMode)) {
+        store.set('screenShareAudioMode', result.audioMode);
+      }
+
+      // desktopCapturer already received the portal-selected source on
+      // Wayland; re-enumerating here would open the system picker again. The
+      // synthetic Haven source is also safe to use directly because its ID
+      // came from mainWindow rather than renderer-controlled data.
+      const selected = wayland || result.sourceId === ownSourceId
+        ? sources.find(source => source.id === result.sourceId) || null
+        : await resolveSelectedSource(sources, result.sourceId);
+      if (!getTrustedServerUrlForFrame(targetContents, requestFrame, { active: true })) {
+        console.warn('[ScreenShare] requesting frame changed before capture attachment');
+        safeCallback({});
+        return;
+      }
+      if (!selected) {
+        // Truly nothing usable: log so we can tell this apart from a normal cancel.
+        console.warn(`[ScreenShare] could not resolve selected source ${result.sourceId} after re-enumeration; aborting`);
+        safeCallback({});
+        return;
+      }
+      if (selected.id !== result.sourceId) {
+        console.log(`[ScreenShare] selected source ID changed between picker and attach: ${result.sourceId} -> ${selected.id} (${selected.name})`);
+      }
+
+      // Only PIDs included in this picker's enumeration may be captured.
+      // Unknown, stale, or forged values resolve to no audio.
+      let audioSelection = resolveAudioSelection(
+        result.audioAppPid,
+        capturableApps,
+        audioCapabilities
+      );
+      let selectedAudioApp = audioSelection.app;
+      if (typeof result.audioAppPid === 'number' && !selectedAudioApp) {
+        console.warn(`[ScreenShare] rejected unlisted audio PID ${result.audioAppPid}`);
+      }
+
+      const preparedAudioPid = selectedAudioApp?.pid ||
+        (audioSelection.type === 'system' ? 'system' : 'none');
+      const preparation = await prepareStandardScreenShare(targetContents, requestFrame, {
+        requestId,
+        audioAppPid: preparedAudioPid,
+      });
+      if (preparation.cancelled ||
+          !getTrustedServerUrlForFrame(targetContents, requestFrame, { active: true })) {
+        safeCallback({});
+        return;
+      }
+      if (preparedAudioPid !== 'none' && !preparation.audioReady) {
+        console.warn('[ScreenShare] renderer audio pipeline was unavailable; continuing without audio');
+        audioSelection = { type: 'none', app: null };
+        selectedAudioApp = null;
+      }
+
+      const startNative = (
+        mode, pid, identity = '', detail = null, detailKey = null, detailValues = null
+      ) => {
+        const reasonRef = { status: null };
+        let ok = false;
+        if (audioCaptureController.hasActive()) {
+          reasonRef.status = {
+            message: t('audio.error.captureBusy'),
+            messageKey: 'audio.error.captureBusy',
+          };
+        } else {
+          audioCaptureController.start(requestId, targetContents);
+          try {
+            console.log(`[ScreenShare] starting native capture: mode=${mode} pid=${pid}`);
+            ok = audioCapture.startCapture(pid, {
+              mode,
+              identity,
+              onData: (pcmData, capturedAt) => {
+                try {
+                  if (!pcmData || !pcmData.buffer) return;
+                  const ab = pcmData.buffer.slice(
+                    pcmData.byteOffset,
+                    pcmData.byteOffset + pcmData.byteLength
+                  );
+                  if (!audioCaptureController.isActive(requestId)) return;
+                  safeSend(targetContents, 'audio:capture-data', {
+                    captureId: requestId,
+                    capturedAt,
+                    data: ab,
+                  });
+                } catch (cbErr) {
+                  console.warn('[ScreenShare] audio callback error:', cbErr.message);
+                }
+              },
+              onStatus: (s) => {
+                if (!audioCaptureController.isActive(requestId)) return;
+                safeSend(targetContents, 'audio:capture-status', { ...s, captureId: requestId });
+                const isSystemMode = mode === 'exclude' || mode === 'system';
+                if (s.kind === 'started') {
+                  if (mode === 'exclude' && process.platform === 'linux') {
+                    pipeWireStreamRouter?.start(`HavenCombined_${process.pid}`, process.pid);
+                  }
+                  safeSend(targetContents, 'audio:share-mode', {
+                    captureId: requestId,
+                    requested: isSystemMode ? 'system' : 'app',
+                    applied: isSystemMode ? 'system-clean' : 'app',
+                    detail,
+                    detailKey,
+                    detailValues,
+                  });
+                } else if (s.kind === 'failed') {
+                  pipeWireStreamRouter?.stop();
+                  reasonRef.status = s;
+                  audioCaptureController.clear(requestId);
+                  safeSend(targetContents, 'audio:share-mode', {
+                    captureId: requestId,
+                    requested: isSystemMode ? 'system' : 'app',
+                    applied: 'none',
+                    detail: s.message || null,
+                    detailKey: s.messageKey || null,
+                    detailValues: s.messageValues || null,
+                  });
+                  setImmediate(() => {
+                    if (!audioCaptureController.hasActive()) {
+                      try { audioCapture.stopCapture(); } catch {}
+                    }
+                  });
+                }
+              },
+            });
+          } catch (err) {
+            console.error(`[ScreenShare] native capture (${mode}) threw:`, err.message);
+            reasonRef.status = {
+              message: err.message,
+              messageKey: err.messageKey,
+              messageValues: err.messageValues,
+            };
+          }
+        }
+        if (!ok) {
+          const reasonKey = reasonRef.status?.messageKey
+            || (!reasonRef.status?.message ? 'audio.unknown' : null);
+          const reasonValues = reasonRef.status?.messageValues || null;
+          const reason = reasonKey
+            ? t(reasonKey, reasonValues || {})
+            : reasonRef.status.message;
+          const message = t('audio.detail.nativeUnavailable', {
+            reason,
+          });
+          safeSend(targetContents, 'audio:capture-status', {
+            captureId: requestId,
+            kind: 'failed',
+            message,
+            messageKey: 'audio.detail.nativeUnavailable',
+            messageValues: { reason, reasonKey, reasonValues },
+            code: 0,
+          });
+          audioCaptureController.stop(requestId, targetContents.id);
+        }
+        return { ok, reason: reasonRef.status?.message || null, status: reasonRef.status };
+      };
+
+      // Audio choices are strict: application capture never degrades to full
+      // system loopback, which could feed Haven's own voice back into the call.
+      let requestedMode = 'none';
+      let appliedMode   = 'none';
+      let appliedDetail = null; // optional human-readable string
+      let appliedDetailKey = null;
+      let appliedDetailValues = null;
+      let appliedDetailReasonKey = null;
+      let appliedDetailReasonValues = null;
+      let appliedDetailReason = null;
+      let useNativeAudio = false;
+
+      const setAppliedErrorDetail = (detailKey, capture, fallbackReasonKey) => {
+        const reason = capture.status?.message || capture.reason || t(fallbackReasonKey);
+        appliedDetail = t(detailKey, { reason });
+        appliedDetailKey = detailKey;
+        appliedDetailReasonKey = capture.status?.messageKey
+          || (!capture.reason ? fallbackReasonKey : null);
+        appliedDetailReasonValues = capture.status?.messageValues || null;
+        appliedDetailReason = capture.status?.messageKey ? null : capture.reason || null;
+      };
+
+      if (selectedAudioApp) {
+        requestedMode = 'app';
+        const appName = selectedAudioApp.name || t('audio.process', { pid: selectedAudioApp.pid });
+        const appNameKey = selectedAudioApp.nameKey
+          || (!selectedAudioApp.name ? 'audio.process' : null);
+        const appNameValues = !selectedAudioApp.name ? { pid: selectedAudioApp.pid } : null;
+        const capture = startNative(
+          'include', selectedAudioApp.pid, selectedAudioApp.identity,
+          appName, appNameKey, appNameValues
+        );
+        if (capture.ok) {
+          useNativeAudio = true;
+          appliedMode    = 'app';
+          appliedDetail  = appName;
+          appliedDetailKey = appNameKey;
+          appliedDetailValues = appNameValues;
+          console.log(`[ScreenShare] per-app capture active for "${appName}"`);
+        } else {
+          setAppliedErrorDetail('audio.detail.appCaptureFailed', capture, 'audio.unknownReason');
+          console.warn(`[ScreenShare] per-app capture failed (${capture.reason || 'unknown'}); continuing without audio`);
+        }
+      } else if (audioSelection.type === 'system') {
+        requestedMode = 'system';
+        const capture = startNative('exclude', process.pid, '');
+        if (capture.ok) {
+          useNativeAudio = true;
+          appliedMode = 'system-clean';
+        } else {
+          setAppliedErrorDetail('audio.detail.cleanSystemUnavailable', capture, 'audio.unknown');
+        }
+      }
+
+      if (!useNativeAudio) {
+        safeSend(targetContents, 'audio:share-mode', {
+          captureId: requestId,
+          requested: requestedMode,
+          applied:   appliedMode,
+          detail:    appliedDetail,
+          detailKey: appliedDetailKey,
+          detailValues: appliedDetailValues,
+          detailReasonKey: appliedDetailReasonKey,
+          detailReasonValues: appliedDetailReasonValues,
+          detailReason: appliedDetailReason,
+        });
+      }
+
+      // Native audio is attached by the preload only after the isolated track
+      // is ready. Never request raw Electron loopback, which includes Haven.
+      safeCallback({ video: selected });
+
+    } catch (err) {
+      console.error('[ScreenShare] handler error:', err);
+      safeCallback({});
+    } finally {
+      screenShareRequestInProgress = false;
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════
+// IPC Handlers
+// ═══════════════════════════════════════════════════════════
+
+function cssColorToHex(s) {
+  if (!s || typeof s !== 'string') return null;
+  const v = s.trim();
+  if (/^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(v)) {
+    const h = v.slice(1);
+    if (h.length === 3 || h.length === 4) return `#${[...h.slice(0, 3)].map((c) => c + c).join('')}`;
+    return `#${h.slice(0, 6)}`;
+  }
+  const m = v.match(/rgba?\(\s*([\d.]+)\s*[, ]+\s*([\d.]+)\s*[, ]+\s*([\d.]+)/i);
+  if (!m) return null;
+  // The value comes from the server's page, so a channel is held to 0-255;
+  // rgb(999, 0, 0) would otherwise build a seven digit color.
+  const hex = (n) => Math.max(0, Math.min(255, Math.round(Number(n)) || 0)).toString(16).padStart(2, '0');
+  return `#${hex(m[1])}${hex(m[2])}${hex(m[3])}`;
+}
+
+function applyWindowTheme({ bg, accent } = {}) {
+  const color = cssColorToHex(bg) || store.get('themeColors.bg') || '#0d0d1a';
+  store.set('themeColors', { bg: color, accent: cssColorToHex(accent) || store.get('themeColors.accent') || '#7c5cfc' });
+  for (const win of [mainWindow, welcomeWindow]) {
+    if (win && !win.isDestroyed()) win.setBackgroundColor(color);
+  }
+}
+
+function registerIPC() {
+
+  const refused = (channel) => console.warn(`[Haven Desktop] refused ${channel} from a page that may not use it`);
+  // Calls that change this computer's settings, the clipboard or the screen
+  // answer only the server page the user is looking at, in its top frame.
+  // A hidden server page, a frame inside a page, or a page that navigated
+  // elsewhere gets `denied` back.
+  const handleFromActiveServer = (channel, fn, denied = false) => {
+    ipcMain.handle(channel, (e, ...args) => {
+      if (!fromActiveServer(e)) { refused(channel); return denied; }
+      return fn(e, ...args);
+    });
+  };
+
+  // Reads and small calls any open server page makes for itself, from its
+  // own top frame. A page that navigated elsewhere in the same view (an
+  // identity provider during sign-in, say) gets `denied`.
+  const handleFromAnyServer = (channel, fn, denied = false) => {
+    ipcMain.handle(channel, (e, ...args) => {
+      if (!fromAnyServer(e)) { refused(channel); return denied; }
+      return fn(e, ...args);
+    });
+  };
+
+  // A hidden server page repainting the window would fight the shown one.
+  ipcMain.on('theme:colors', (e, payload) => {
+    if (fromActiveServer(e)) applyWindowTheme(payload || {});
+  });
+
+  // ── Internationalization ──────────────────────────────
+  ipcMain.on('i18n:get-state-sync', (event) => {
+    event.returnValue = getI18nState();
+  });
+  ipcMain.on('i18n:is-active-server-sync', (event) => {
+    const serverUrl = getServerUrlForContents(event.sender);
+    event.returnValue = !!serverUrl && serverUrl === activeServerUrl;
+  });
+  ipcMain.on('i18n:set-language-sync', (event, preference) => {
+    if (!isLanguageSenderAllowed(event)) {
+      event.returnValue = getI18nState();
+      return;
+    }
+    event.returnValue = setLanguagePreference(preference);
+  });
+  ipcMain.handle('i18n:set-language', (event, preference) => {
+    if (!isLanguageSenderAllowed(event)) return getI18nState();
+    return setLanguagePreference(preference);
+  });
+  ipcMain.handle('i18n:refresh-automatic', (event) => {
+    if (!isLanguageSenderAllowed(event)) return getI18nState();
+    if ((store.get('language') || SYSTEM_LANGUAGE) === SYSTEM_LANGUAGE) {
+      const activeServerLocale = activeServerUrl
+        ? serverLanguageStates.get(activeServerUrl)?.locale
+        : null;
+      if (activeServerLocale) applyAutomaticServerLocale(activeServerLocale);
+      else {
+        refreshLocale();
+        refreshLanguageSurfaces();
+      }
+    }
+    return getI18nState();
+  });
+  ipcMain.on('i18n:server-state', (event, state = {}) => {
+    const url = getTrustedServerUrlForFrame(event.sender, event.senderFrame);
+    if (!url) return;
+    const preference = typeof state.preference === 'string' ? state.preference.slice(0, 20) : 'auto';
+    const locale = typeof state.locale === 'string' ? state.locale.slice(0, 20) : '';
+    serverLanguageStates.set(url, { preference, locale });
+    if (url === activeServerUrl && locale) applyAutomaticServerLocale(locale);
+  });
+
+  // ── Server Management ─────────────────────────────────
+  // Starting a server runs the code in the folder it is given, so only the
+  // welcome screen's own page may ask. A server page never can, whatever it
+  // manages to reach in its preload.
+  ipcMain.handle('server:detect', (e) => {
+    if (!fromWelcomeScreen(e)) { refused('server:detect'); return null; }
+    return serverManager.detectServer();
+  });
+  ipcMain.handle('server:start', (e, dir) => {
+    if (!fromWelcomeScreen(e)) { refused('server:start'); return { success: false }; }
+    return serverManager.startServer(dir);
+  });
+  ipcMain.handle('server:stop', (e) => {
+    if (!fromWelcomeScreen(e)) { refused('server:stop'); return false; }
+    return serverManager.stopServer();
+  });
+  ipcMain.handle('server:status', (e) => {
+    if (!fromWelcomeScreen(e)) { refused('server:status'); return null; }
+    return serverManager.getStatus();
+  });
+
+  ipcMain.handle('server:browse', async (e) => {
+    if (!fromWelcomeScreen(e)) { refused('server:browse'); return null; }
+    const lastPath = store.get('userPrefs.serverPath');
+    const r = await dialog.showOpenDialog(welcomeWindow || mainWindow, {
+      title: t('dialog.selectServerDirectory'),
+      defaultPath: lastPath || undefined,
+      properties: ['openDirectory'],
+    });
+    return r.canceled ? null : r.filePaths[0];
+  });
+
+  ipcMain.handle('server:browse-file', async (e) => {
+    if (!fromWelcomeScreen(e)) { refused('server:browse-file'); return null; }
+    const r = await dialog.showOpenDialog(welcomeWindow || mainWindow, {
+      title: t('dialog.selectServerFile'),
+      properties: ['openFile'],
+      filters: [{ name: 'JavaScript', extensions: ['js'] }],
+    });
+    return r.canceled ? null : r.filePaths[0];
+  });
+
+  // ── Auto-Update ───────────────────────────────────────
+  // Downloading and installing restart the app, so only the welcome screen
+  // and the server page on screen may ask; the banner lives on both.
+  ipcMain.handle('update:download', async (e) => {
+    if (!fromAppScreen(e) && !fromActiveServer(e)) { refused('update:download'); return { errorKey: 'update.unavailable' }; }
+    if (!autoUpdater) return { errorKey: 'update.unavailable' };
+    updateState.setDownloading(true);
+    try { await autoUpdater.downloadUpdate(); return { success: true }; }
+    catch (err) { return { error: err.message }; }
+    finally { updateState.setDownloading(false); }
+  });
+  // A page that has just loaded asks what the updater found, so the banner
+  // shows even when the check answered before the page was there. (#63)
+  ipcMain.handle('update:state', (e) => {
+    if (!fromAppScreen(e) && !fromAnyServer(e)) return null;
+    return updateState.forPage();
+  });
+  // Closing the banner keeps it closed on every page until a newer version
+  // turns up or the user checks from the menu.
+  ipcMain.on('update:dismiss', (e) => {
+    if (!fromAppScreen(e) && !fromAnyServer(e)) { refused('update:dismiss'); return; }
+    updateState.dismiss();
+  });
+  ipcMain.on('update:install', (e) => {
+    if (!fromAppScreen(e) && !fromActiveServer(e)) { refused('update:install'); return; }
+    if (autoUpdater) {
+      serverManager?.stopServer();
+      autoUpdater.quitAndInstall(false, true);
+    }
+  });
+
+  // ── Audio Capture ─────────────────────────────────────
+  // Capture only ever starts from the screen-share picker (the display-media
+  // handler above). Server pages could once list every app playing sound and
+  // start recording any of them, with nothing on screen to say so; Haven
+  // never used that, so it is gone.
+  // Stop goes through the controller so the registry entry is detached
+  // together with the C++ capture. Stopping the addon directly leaves
+  // hasActive() true, and the next share would start without audio
+  // (captureBusy); it also lets a stale request kill a newer capture.
+  handleFromAnyServer('audio:stop-capture', (event, { captureId } = {}) => {
+    if (typeof captureId !== 'string') return false;
+    return audioCaptureController.stop(captureId, event.sender.id);
+  });
+  handleFromAnyServer('audio:is-supported', () => {
+    try { return audioCapture.isSupported(); }
+    catch (err) { console.warn('[Audio] could not check native capture support:', err.message); return false; }
+  });
+  handleFromAnyServer('audio:opt-out-ducking', () => audioCapture.optOutOfDucking());
+
+  handleFromAnyServer('video:get-encoder-config', () => ({
+    preference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
+    hardwareAvailable: hardwareVideoEncodingAvailable,
+    hardwareStatus: hardwareVideoEncodingStatus,
+    platform: process.platform,
+  }), null);
+
+  // ── Audio Devices ─────────────────────────────────────
+  handleFromActiveServer('devices:get-inputs', async () => {
+    const wc = getActiveContents();
+    if (!wc) return [];
+    const fallbackLabel = JSON.stringify(t('device.microphone'));
+    return wc.executeJavaScript(`
+      navigator.mediaDevices.enumerateDevices()
+        .then(d => d.filter(x => x.kind==='audioinput').map(x => ({ deviceId:x.deviceId, label:x.label||${fallbackLabel}+' '+x.deviceId.slice(0,8), groupId:x.groupId })))
+    `);
+  }, []);
+
+  handleFromActiveServer('devices:get-outputs', async () => {
+    const wc = getActiveContents();
+    if (!wc) return [];
+    const fallbackLabel = JSON.stringify(t('device.speaker'));
+    return wc.executeJavaScript(`
+      navigator.mediaDevices.enumerateDevices()
+        .then(d => d.filter(x => x.kind==='audiooutput').map(x => ({ deviceId:x.deviceId, label:x.label||${fallbackLabel}+' '+x.deviceId.slice(0,8), groupId:x.groupId })))
+    `);
+  }, []);
+
+  // ── Notifications ─────────────────────────────────────
+  // Any open server may notify, hidden ones included (that is what keeps
+  // their unreads live), but only from its own top frame, and a hidden
+  // server's notification names it so it cannot pass for another.
+  ipcMain.handle('notify', (e, opts) => {
+    const serverUrl = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!serverUrl) { refused('notify'); return false; }
+    opts = opts && typeof opts === 'object' ? opts : {};
+    const n = new Notification({
+      title: notificationTitle(opts.title, {
+        active: serverUrl === activeServerUrl,
+        serverName: buildServerNameMap()[serverUrl] || dialogHost(serverUrl),
+      }),
+      body:  String(opts.body || '').slice(0, 1000),
+      icon:  ICON_PATH,
+      silent: opts.silent === true,
+    });
+    n.show();
+    onScreenNotifications.add(n);
+    n.on('close', () => onScreenNotifications.delete(n));
+    // Tracked per server + channel so another device marking the channel
+    // read can close this toast too (Haven #cross-device-notification-dismissal).
+    // The entry stays after the toast leaves the screen: on Windows it is then
+    // in the Notification Center, and close() on the same object is what
+    // removes it from there. It goes when it is dismissed, clicked or replaced.
+    const channelCode = typeof opts.channelCode === 'string' ? opts.channelCode.slice(0, 200) : null;
+    if (channelCode) {
+      const key = `${serverUrl}|${channelCode}`;
+      liveNotificationsByServerAndChannel.get(key)?.close();
+      liveNotificationsByServerAndChannel.delete(key); // re-insert so the oldest entry is the first
+      liveNotificationsByServerAndChannel.set(key, n);
+      while (liveNotificationsByServerAndChannel.size > 200) {
+        liveNotificationsByServerAndChannel.delete(liveNotificationsByServerAndChannel.keys().next().value);
+      }
+    }
+    n.on('click', () => {
+      if (channelCode) {
+        const key = `${serverUrl}|${channelCode}`;
+        if (liveNotificationsByServerAndChannel.get(key) === n) liveNotificationsByServerAndChannel.delete(key);
+      }
+      mainWindow?.show();
+      mainWindow?.focus();
+      // A toast from a server that is not on screen brings that server up
+      // first, or the channel switch below lands on a page nobody can see.
+      if (serverUrl !== activeServerUrl && serverViews.has(serverUrl)) switchToServer(serverUrl);
+      // Tell the renderer which channel to navigate to
+      if (channelCode) {
+        safeSend(e.sender, 'notification-clicked', channelCode);
+      }
+    });
+
+    // Badge is managed exclusively by the renderer via 'notification-badge' IPC.
+    // Setting it here caused a race: the renderer would clear the badge (unreads=0)
+    // right before notify() re-set it, leaving a phantom taskbar badge forever.
+    // The taskbar flash does belong here: it goes with a notification, and
+    // focusing the window stops it. (Haven #5693) It can be switched off in
+    // Settings: on KDE it shows as a highlight that stays until Haven is
+    // opened.
+    if (store.get('flashTaskbar') !== false) {
+      try { if (mainWindow && !mainWindow.isFocused()) mainWindow.flashFrame(true); } catch (err) { console.warn('[Haven] taskbar flash failed:', err?.message || err); }
+    }
+    return true;
+  });
+
+  // Another device for this account marked a channel read: close our own
+  // toast for it, if we still have one showing. Scoped to the calling
+  // server's own channel namespace, same as notify() above.
+  ipcMain.on('dismiss-notification', (e, channelCode) => {
+    const serverUrl = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!serverUrl || typeof channelCode !== 'string' || !channelCode) return;
+    const key = `${serverUrl}|${channelCode.slice(0, 200)}`;
+    const toast = liveNotificationsByServerAndChannel.get(key);
+    if (!toast) return;
+    liveNotificationsByServerAndChannel.delete(key);
+    try { toast.close(); } catch {}
+    // The taskbar flash goes with a notification. Once the last toast still
+    // on screen is gone there is nothing left to look at, so end the flash
+    // (and the steady highlight Windows leaves behind). The unread overlay
+    // badge is separate and follows the unread counts.
+    if (onScreenNotifications.size === 0) {
+      try { mainWindow?.flashFrame(false); } catch {}
+    }
+  });
+
+  // ── Unread badge signal (fired by renderer on any unread count change) ──
+  // Tracks per-server unread state so one server clearing its badge doesn't
+  // accidentally clear another server's unreads.
+  ipcMain.on('notification-badge', (e, hasUnread) => {
+    // Each server view reports its own unreads, from its own top frame. A
+    // view keeps its webContents across reloads, so the sender is matched by
+    // identity only; a popup or a page that navigated elsewhere cannot
+    // speak for a server.
+    const senderUrl = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!senderUrl) return;
+    serverBadgeState.set(senderUrl, !!hasUnread);
+    recomputeTaskbarBadge();
+    // The map names every server the user has, so only the page on screen
+    // gets it; a page that comes on screen later is sent it then
+    // (switchToServer).
+    if (activeServerUrl) sendServerBadges(serverViews.get(activeServerUrl)?.webContents);
+
+  });
+
+  // ── Renderer reports which server URLs its sidebar can display ──
+  // Used by recomputeTaskbarBadge to skip phantom unreads from background
+  // servers the user has no visible icon for. (#5269)
+  ipcMain.on('report-known-server-urls', (e, urls) => {
+    const senderUrl = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!senderUrl || !Array.isArray(urls)) return;
+    const set = new Set();
+    for (const u of urls.slice(0, 500)) {
+      const n = normalizeServerUrl(u);
+      if (n) set.add(n);
+    }
+    knownServerUrlsByView.set(senderUrl, set);
+    recomputeTaskbarBadge();
+  });
+
+  // ── Query per-server badge state (renderer asks for current state) ──
+  // Returns { badges, names } so the renderer can show an "unread elsewhere"
+  // fallback icon for servers missing from its sidebar.
+  ipcMain.handle('get-server-badges', (e) => {
+    if (!serverListReader(e)) return { badges: {}, names: {} };
+    return serverBadgePayload();
+  });
+
+  // ── Window Controls ───────────────────────────────────
+  // A hidden server page may not close or resize the window under the user.
+  const windowControlAllowed = (e) => fromAppScreen(e) || fromActiveServer(e);
+  ipcMain.on('window:minimize', (e) => {
+    if (windowControlAllowed(e)) BrowserWindow.getFocusedWindow()?.minimize();
+  });
+  ipcMain.on('window:maximize', (e) => {
+    if (!windowControlAllowed(e)) return;
+    const w = BrowserWindow.getFocusedWindow();
+    w?.isMaximized() ? w.unmaximize() : w?.maximize();
+  });
+  ipcMain.on('window:close', (e) => {
+    if (windowControlAllowed(e)) BrowserWindow.getFocusedWindow()?.close();
+  });
+
+  // ── Fullscreen (BrowserView doesn't support the HTML5 Fullscreen API natively;
+  //    the preload overrides requestFullscreen / exitFullscreen via IPC) ──
+  ipcMain.on('window:enter-fullscreen', (e) => {
+    if (!fromActiveServer(e)) return;
+    if (mainWindow && !mainWindow.isFullScreen()) mainWindow.setFullScreen(true);
+  });
+  ipcMain.on('window:leave-fullscreen', (e) => {
+    if (!fromActiveServer(e)) return;
+    if (mainWindow && mainWindow.isFullScreen()) mainWindow.setFullScreen(false);
+  });
+
+  // ── Listen Together media keys (see refreshMediaKeys) ──
+  // Any server page may ask, shown or not: music keeps playing in a voice
+  // call on a server that is not on screen.
+  ipcMain.on('music:media-keys', (e, payload) => {
+    if (!getTrustedServerUrlForFrame(e.sender, e.senderFrame)) return;
+    setMediaKeyClaim(e.sender, payload);
+  });
+
+  // ── Activity from other apps (see app-activity.js) ──
+  // Any server page may ask whether it is switched on for its own server.
+  // Switching it on takes the page on screen, a click or key press there
+  // just now, and the user's yes in the app's own dialog.
+  ipcMain.handle('app-activity:status', (e) => {
+    const url = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!url) return { supported: false, enabled: false };
+    const enabled = appActivityAllowed(url);
+    if (enabled) watchAppActivity(e.sender);
+    return { supported: true, enabled };
+  });
+  ipcMain.handle('app-activity:enable', async (e, action) => {
+    const url = getTrustedServerUrlForFrame(e.sender, e.senderFrame, { active: true });
+    if (!url) return { enabled: false };
+    if (!appActivityAllowed(url)) {
+      if (!action || action.fresh !== true || _appActivityAsking) return { enabled: false };
+      _appActivityAsking = true;
+      let yes = false;
+      try { yes = await askAboutAppActivity(url); }
+      finally { _appActivityAsking = false; }
+      if (!yes) return { enabled: false };
+      store.set('appActivityServers', [...appActivityServers(), appActivity.serverOrigin(url)]);
+    }
+    // The page may have gone while the question was open.
+    if (e.sender.isDestroyed() || serverViews.get(url)?.webContents !== e.sender) return { enabled: false };
+    watchAppActivity(e.sender);
+    return { enabled: true };
+  });
+  ipcMain.handle('app-activity:disable', (e) => {
+    const url = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!url) return { enabled: false };
+    const origin = appActivity.serverOrigin(url);
+    store.set('appActivityServers', appActivityServers().filter(o => o !== origin));
+    unwatchAppActivity(e.sender.id);
+    return { enabled: false };
+  });
+
+  // ── Voice overlay (see voice-overlay.js) ──
+  // Any server page may report, shown or not: you stay in a call on a
+  // server that is not on screen.
+  ipcMain.handle('voice-overlay:enabled', (e) => {
+    return !!getTrustedServerUrlForFrame(e.sender, e.senderFrame) && !!voiceOverlay?.enabled;
+  });
+  ipcMain.on('voice-overlay:report', (e, report) => {
+    const url = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!url || !voiceOverlay?.enabled) return;
+    setVoiceReport(e.sender, sanitizeVoiceReport(report, getHttpOrigin(url)));
+  });
+
+  // ── Settings ──────────────────────────────────────────
+  const ALLOWED_SETTINGS_KEYS = new Set([
+    'userPrefs', 'windowBounds', 'audioInputDevice', 'audioOutputDevice',
+    'lastServer', 'pushToTalk', 'pushToTalkKey', 'noiseGate', 'noiseThreshold',
+    'desktopShortcuts', 'startOnLogin', 'startHidden', 'minimizeToTray', 'forceSDR',
+    'disableGpuVsync', 'unlimitFrameRate', 'linuxVaapiBypass', 'linuxForceX11', 'videoEncoderPreference'
+  ]);
+  // Only Haven Desktop's own screens (welcome, splash, the error page) use
+  // the generic store; they load from local files. A server page must never
+  // reach it: it could point the "host a server" folder at a network share it
+  // controls, and the next launch would run whatever server.js it found there.
+  // Server pages have their own narrow calls (prefs, shortcuts, history).
+  ipcMain.handle('settings:get', (e, key) => {
+    if (!fromAppScreen(e) || !ALLOWED_SETTINGS_KEYS.has(key)) return undefined;
+    return store.get(key);
+  });
+  ipcMain.handle('settings:set', (e, key, value)  => {
+    if (!fromAppScreen(e) || !ALLOWED_SETTINGS_KEYS.has(key)) return false;
+    store.set(key, value);
+    return true;
+  });
+
+  // ── App Info ──────────────────────────────────────────
+  ipcMain.handle('app:version', (e) => {
+    if (!fromAppScreen(e) && !fromAnyServer(e)) { refused('app:version'); return null; }
+    return app.getVersion();
+  });
+
+  // ── Clipboard: write image ───────────────────────────
+  // Renderer-side navigator.clipboard.write([new ClipboardItem({...})])
+  // is unreliable for arbitrary remote images in Electron: the
+  // user-gesture token gets dropped across the async fetch + decode,
+  // and Chromium silently rejects the write with NotAllowedError.
+  // Bypass it entirely by handing the image bytes to the main process
+  // where Electron's `clipboard` module has no gesture restrictions.
+  // Accepts either a data: URL or a raw base64 PNG/JPEG string.
+  handleFromActiveServer('clipboard:write-image', async (e, payload) => {
+    try {
+      if (!payload || typeof payload !== 'string') {
+        return { ok: false, reason: 'no-payload' };
+      }
+      // Ensure the BrowserView has OS focus before writing. Some Windows
+      // clipboard brokers still gate writes on the focused HWND even from
+      // the main process when the renderer just dismissed a context menu.
+      try {
+        const wc = e && e.sender;
+        if (wc && !wc.isDestroyed()) {
+          if (typeof wc.focus === 'function') wc.focus();
+          const win = BrowserWindow.fromWebContents(wc) || mainWindow;
+          if (win && !win.isDestroyed()) win.focus();
+        } else if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.focus();
+        }
+      } catch { /* focus is best-effort */ }
+
+      let img;
+      if (payload.startsWith('data:')) {
+        img = nativeImage.createFromDataURL(payload);
+      } else {
+        // Strip optional whitespace/newlines that some encoders insert.
+        const b64 = payload.replace(/\s+/g, '');
+        img = nativeImage.createFromBuffer(Buffer.from(b64, 'base64'));
+      }
+      if (!img || img.isEmpty()) return { ok: false, reason: 'decoded-empty' };
+      // Prefer clipboard.write({ image }): on Windows this also clears
+      // stale CF_HTML / CF_TEXT formats that can make Paste in some apps
+      // prefer an old text clip over the new image.
+      try {
+        clipboard.write({ image: img });
+      } catch {
+        clipboard.writeImage(img);
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: String(err && err.message || err) };
+    }
+  }, { ok: false, reason: 'not-allowed' });
+
+  // Text fallback used when image bytes can't be obtained. Same focus
+  // dance as write-image so it doesn't hit gesture locks.
+  handleFromActiveServer('clipboard:write-text', async (e, text) => {
+    try {
+      if (typeof text !== 'string' || !text) return { ok: false, reason: 'no-text' };
+      try {
+        const wc = e && e.sender;
+        if (wc && !wc.isDestroyed() && typeof wc.focus === 'function') wc.focus();
+        const win = (wc && BrowserWindow.fromWebContents(wc)) || mainWindow;
+        if (win && !win.isDestroyed()) win.focus();
+      } catch { /* best-effort */ }
+      clipboard.writeText(text);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: String(err && err.message || err) };
+    }
+  }, { ok: false, reason: 'not-allowed' });
+
+  // WebView download= is ignored for many http(s) image URLs. Haven calls
+  // havenDesktop.saveImage with base64 bytes so we can show a real save dialog.
+  handleFromActiveServer('dialog:save-image', async (e, { payload, filename } = {}) => {
+    try {
+      if (!payload || typeof payload !== 'string') return { ok: false, reason: 'no-payload' };
+      const raw = payload.includes(',') ? payload.slice(payload.lastIndexOf(',') + 1) : payload;
+      const buf = Buffer.from(String(raw).replace(/\s+/g, ''), 'base64');
+      if (!buf.length) return { ok: false, reason: 'empty-image' };
+      const leaf = String(filename || 'haven-image.png').replace(/\\/g, '/').split('/').pop() || 'haven-image.png';
+      const name = leaf.replace(/[^A-Za-z0-9._-]/g, '') || 'haven-image.png';
+      const wc = e && e.sender;
+      const win = (wc && !wc.isDestroyed() && BrowserWindow.fromWebContents(wc)) || mainWindow;
+      const picked = await dialog.showSaveDialog(win && !win.isDestroyed() ? win : undefined, {
+        title: 'Save image',
+        defaultPath: name,
+        filters: [{ name: 'Image', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }],
+      });
+      if (picked.canceled || !picked.filePath) return { ok: false, cancelled: true };
+      fs.writeFileSync(picked.filePath, buf);
+      return { ok: true, path: picked.filePath };
+    } catch (err) {
+      return { ok: false, reason: String(err && err.message || err) };
+    }
+  }, { ok: false, reason: 'not-allowed' });
+
+  // ── Desktop App Preferences ───────────────────────────
+  handleFromAnyServer('desktop:get-prefs', () => ({
+    startOnLogin:     !!store.get('startOnLogin'),
+    startHidden:      !!store.get('startHidden'),
+    minimizeToTray:   !!store.get('minimizeToTray'),
+    flashTaskbar:     store.get('flashTaskbar') !== false,
+    forceSDR:         !!store.get('forceSDR'),
+    hideMenuBar:      !!store.get('hideMenuBar'),
+    disableGpuVsync:  !!store.get('disableGpuVsync'),
+    unlimitFrameRate: !!store.get('unlimitFrameRate'),
+    linuxVaapiBypass: !!store.get('linuxVaapiBypass'),
+    linuxForceX11:    !!store.get('linuxForceX11'),
+    language:         getI18nState(),
+    videoEncoderPreference: normalizeVideoEncoderPreference(store.get('videoEncoderPreference')),
+  }), {});
+
+  handleFromActiveServer('desktop:set-start-on-login', (_e, enabled) => {
+    store.set('startOnLogin', !!enabled);
+    const hiddenArg = store.get('startHidden') ? ['--hidden'] : [];
+    app.setLoginItemSettings({
+      openAtLogin: !!enabled,
+      args: enabled ? hiddenArg : [],
+    });
+    return true;
+  });
+
+  handleFromActiveServer('desktop:set-start-hidden', (_e, enabled) => {
+    store.set('startHidden', !!enabled);
+    // Re-sync login item args so --hidden is included/excluded
+    const loginEnabled = !!store.get('startOnLogin');
+    if (loginEnabled) {
+      app.setLoginItemSettings({
+        openAtLogin: true,
+        args: enabled ? ['--hidden'] : [],
+      });
+    }
+    return true;
+  });
+
+  handleFromActiveServer('desktop:set-minimize-to-tray', (_e, enabled) => {
+    store.set('minimizeToTray', !!enabled);
+    rebuildTrayMenu(); // its checkbox shows the same setting
+    return true;
+  });
+
+  handleFromActiveServer('desktop:set-force-sdr', (_e, enabled) => {
+    store.set('forceSDR', !!enabled);
+    // force-color-profile is a Chromium command-line switch, requires restart
+    return { requiresRestart: true };
+  });
+
+  handleFromActiveServer('desktop:set-hide-menu-bar', (_e, enabled) => {
+    store.set('hideMenuBar', !!enabled);
+    if (mainWindow) {
+      mainWindow.setAutoHideMenuBar(!!enabled);
+      mainWindow.setMenuBarVisibility(!enabled);
+      // Hiding or showing the bar changes the content area without a resize
+      // event, so the server view kept its old height and left a strip of
+      // bare window along the bottom. Re-fit it now and once the frame has
+      // settled. (Haven #5626)
+      const refit = () => { try { syncAllServerViewBounds(); } catch {} };
+      refit();
+      setTimeout(refit, 100);
+    }
+    return true;
+  });
+
+  // #35: G-Sync / VRR FPS-drop workaround. Both flags are Chromium
+  // command-line switches applied at app boot, so flipping them requires a
+  // restart to take effect. The renderer surfaces a toast saying so.
+  handleFromActiveServer('desktop:set-disable-gpu-vsync', (_e, enabled) => {
+    store.set('disableGpuVsync', !!enabled);
+    return { requiresRestart: true };
+  });
+
+  // Flash the taskbar for a notification. Turning it off also ends a flash
+  // already going.
+  handleFromActiveServer('desktop:set-flash-taskbar', (_e, enabled) => {
+    store.set('flashTaskbar', !!enabled);
+    if (!enabled && mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.flashFrame(false); } catch (err) { console.warn('[Haven] could not stop the taskbar flash:', err?.message || err); }
+    }
+    return { requiresRestart: false };
+  });
+
+  handleFromActiveServer('desktop:set-unlimit-frame-rate', (_e, enabled) => {
+    store.set('unlimitFrameRate', !!enabled);
+    return { requiresRestart: true };
+  });
+
+  // Linux VA-API driver-blocklist bypass (AcceleratedVideoEncoder,
+  // VaapiOnNvidiaGPUs, VaapiIgnoreDriverChecks). Off by default; Chromium
+  // command-line switches applied at app boot, so flipping it requires a
+  // restart to take effect.
+  handleFromActiveServer('desktop:set-linux-vaapi-bypass', (_e, enabled) => {
+    store.set('linuxVaapiBypass', !!enabled);
+    return { requiresRestart: true };
+  });
+
+  // Linux X11 mode (Haven #5721): a Chromium switch applied at boot, so it
+  // takes a restart.
+  handleFromActiveServer('desktop:set-linux-force-x11', (_e, enabled) => {
+    store.set('linuxForceX11', !!enabled);
+    // A choice made now starts fresh: an old failed-start marker must not
+    // turn X11 mode straight back off at the next launch.
+    clearX11Pending();
+    return { requiresRestart: true };
+  });
+
+  // ── Desktop Shortcuts ─────────────────────────────────
+  // ptm is always listed, empty when unbound, so the settings page can tell
+  // this build has push to mute and show its row.
+  handleFromAnyServer('shortcuts:get', () => ({ ptm: '', ...(store.get('desktopShortcuts') || {}) }), {});
+
+  // A key that types is refused for anything but a held shortcut (hold to
+  // talk, push to mute), which the input hook only listens to (see
+  // registerVoiceShortcuts and ipc-policy.js).
+  handleFromActiveServer('shortcuts:register', (_e, updates) => {
+    if (!updates || typeof updates !== 'object') return false;
+    unregisterVoiceShortcuts();
+    const cfg = { ...store.get('desktopShortcuts') };
+    // `pttMode` ('toggle' | 'hold') is stored alongside the keybinds so
+    // registerVoiceShortcuts() can decide whether PTT needs press/release
+    // events from uiohook. (#5255 / #184)
+    const allowed = new Set(['mute', 'deafen', 'ptt', 'ptm', 'pttMode']);
+    if (updates.pttMode === 'toggle' || updates.pttMode === 'hold') cfg.pttMode = updates.pttMode;
+    const refusedKeys = {};
+    Object.entries(updates).forEach(([k, v]) => {
+      if (!allowed.has(k) || k === 'pttMode') return;
+      if (typeof v !== 'string' || v.length > 50) return;
+      if (shortcutKeyRefused(cfg, k, v)) { refusedKeys[k] = v; return; }
+      cfg[k] = v;
+    });
+    store.set('desktopShortcuts', cfg);
+    registerVoiceShortcuts();
+    // Report registration outcome per-shortcut, with a reason when a bind
+    // didn't take so the renderer can surface a useful toast instead of
+    // the generic "may already be in use" message (#184).
+    //   'ok':                    registered successfully
+    //   'uiohook-unavailable':   bind needs uiohook-napi (Mouse4/5 or bare
+    //                             modifier) and the optional native dep
+    //                             didn't load (most common on Linux without
+    //                             libuiohook installed)
+    //   'conflict':              Electron's globalShortcut couldn't claim
+    //                             the combo (already taken by the OS or
+    //                             another app)
+    const uiohookOk = !!(_uiohook && _uiohookStarted);
+    const result = {};
+    Object.entries(cfg).forEach(([k, v]) => {
+      if (k === 'pttMode') { result[k] = { ok: true, reason: 'ok' }; return; }
+      if (!v)              { result[k] = { ok: true, reason: 'ok' }; return; }
+      if (shortcutKeyRefused(cfg, k, v)) { result[k] = { ok: false, reason: 'typing-key', accel: v }; return; }
+      // A key the input hook took (hold mode, or one Electron refused) is
+      // not in globalShortcut, so asking it would call the binding a
+      // conflict and the settings page would throw the key away. (#38)
+      const viaHook = [..._uiohookKeyBindings.keys(), ..._uiohookMouseBindings.keys()].some(key => key.startsWith(v + '|'));
+      if (viaHook) {
+        result[k] = uiohookOk
+          ? { ok: true,  reason: 'ok' }
+          : { ok: false, reason: 'uiohook-unavailable', accel: v };
+        return;
+      }
+      if (_isUiohookAccel(v)) {
+        result[k] = uiohookOk
+          ? { ok: true,  reason: 'ok' }
+          : { ok: false, reason: 'uiohook-unavailable', accel: v };
+        return;
+      }
+      if (isTypingKeyAccelerator(v)) {
+        // A held shortcut on a typing key only works through the input hook.
+        result[k] = { ok: false, reason: 'uiohook-unavailable', accel: v };
+        return;
+      }
+      const ok = globalShortcut.isRegistered(v);
+      result[k] = ok
+        ? { ok: true,  reason: 'ok' }
+        : { ok: false, reason: 'conflict', accel: v };
+    });
+    for (const [k, v] of Object.entries(refusedKeys)) result[k] = { ok: false, reason: 'typing-key', accel: v };
+    return result;
+  });
+
+  // ── Navigation ────────────────────────────────────────
+  // Only the app's own screens open a server this way.
+  ipcMain.on('nav:open-app', (e, serverUrl) => {
+    if (serverListSender(e)?.local) createAppWindow(serverUrl);
+  });
+  // Going back to the welcome screen also stops a server this app runs.
+  ipcMain.on('nav:back-to-welcome', (e) => {
+    if (!fromAppScreen(e) && !fromActiveServer(e)) { refused('nav:back-to-welcome'); return; }
+    resetToWelcome();
+  });
+  // Opening a server adds it to the list, so a page opening one that is not
+  // listed asks the user first. A click is always the user's own; fresh
+  // says whether it came just now (see app-preload.js).
+  ipcMain.on('nav:switch-server', async (e, serverUrl, action) => {
+    if (!mainWindow || typeof serverUrl !== 'string' || !/^https?:\/\//i.test(serverUrl)) return;
+    const { applied } = await requestServerListChange(e, { kind: 'open', url: serverUrl }, action);
+    if (applied && mainWindow) switchToServer(normalizeServerUrl(serverUrl));
+  });
+
+  // ── Checking a new server (#62) ──────────────────────
+  // Only the app's own screens may say which server they are checking, so a
+  // server page cannot make the app ask about some other host's certificate.
+  // The one exception is the Switch Server picker, which lives on the active
+  // server's login page: its own top frame, which can already move the app
+  // to any server through nav:change-primary-server.
+  const serverCheckAllowed = (e) =>
+    (isLocalScreenFrame(e.sender, e.senderFrame) && !getServerUrlForContents(e.sender)) ||
+    !!getTrustedServerUrlForFrame(e.sender, e.senderFrame, { active: true });
+  ipcMain.handle('server-check:begin', (e, url) => serverCheckAllowed(e) && _serverChecks.add(url));
+  ipcMain.handle('server-check:question-pending', (e, url) => serverCheckAllowed(e) && certQuestionPending(url));
+  ipcMain.handle('server-check:wait-for-trust', async (e, url) => {
+    if (!serverCheckAllowed(e)) return false;
+    const answer = pendingCertAnswer(url);
+    if (answer) await answer;
+    return _serverChecks.trustedDuringCheck(url);
+  });
+
+  // ── Change Primary Server (from login page server picker) ──
+  // The picker lives in a server's own page, so a server that is not listed
+  // is asked about like any other page request.
+  ipcMain.on('nav:change-primary-server', async (e, serverUrl, action) => {
+    if (!mainWindow || typeof serverUrl !== 'string' || !/^https?:\/\//i.test(serverUrl)) return;
+    const { applied } = await requestServerListChange(e, { kind: 'open', url: serverUrl }, action);
+    if (!applied || !mainWindow) return;
+    try {
+      const newUrl = normalizeServerUrl(serverUrl);
+      for (const [u, view] of serverViews) {
+        mainWindow.removeBrowserView(view);
+        try { view.webContents.destroy(); } catch {}
+      }
+      serverViews.clear();
+      serverBadgeState.clear();
+      knownServerUrlsByView.clear();
+      primaryServerUrl = newUrl;
+      activeServerUrl = null;
+      store.set('userPrefs.serverUrl', newUrl);
+      store.set('userPrefs.mode', 'join');
+      switchToServer(newUrl);
+    } catch {}
+  });
+
+  // ── Server History ────────────────────────────────────
+  // Sanitize on read so legacy entries with mixed casing, /app paths, or
+  // garbage hostnames (e.g. someone typed "https") get cleaned up the next
+  // time the renderer asks for the list.
+  ipcMain.handle('server-history:get', (e) => {
+    if (!serverListReader(e)) return [];
+    const raw = store.get('serverHistory') || [];
+    const list = readServerList(store);
+    if (list.history.length !== raw.length || list.history.some((c, i) => c.url !== raw[i]?.url)) {
+      store.set('serverHistory', list.history);
+    }
+    return list.history;
+  });
+  // Synchronous variant for preload bootstrap. The renderer can't wait on a
+  // promise before the page-scripts run, but it CAN do a sendSync at preload
+  // time. This lets the sidebar populate with the user's known servers on
+  // first-join to a brand-new server before any network calls happen.
+  ipcMain.on('server-history:get-sync', (e) => {
+    if (!serverListReader(e)) { e.returnValue = []; return; }
+    try {
+      e.returnValue = readServerList(store).history;
+    } catch (err) {
+      console.warn('[Haven Desktop] Could not read server history:', err.message);
+      e.returnValue = [];
+    }
+  });
+  // A page adds, removes or renames a server only with the user's yes in
+  // the app's own dialog (requestServerListChange); a page may report its
+  // own server's name. The answers keep their old shapes for older pages.
+  // action (added by app-preload.js): { user, fresh }, see
+  // requestServerListChange; removals and renames the page does not mark as
+  // the user's are a page syncing on its own and change nothing.
+  // add: opts.userInitiated is the user's own Add Server; without it nothing
+  // is added. Resolves to 'added', 'exists', 'refused', 'invalid',
+  // 'declined', 'busy' or 'blocked'.
+  ipcMain.handle('server-history:add', async (e, url, name, opts, action) => {
+    const { result } = await requestServerListChange(e, { kind: 'add', url, name, opts }, action);
+    return result === 'denied' ? 'refused' : result;
+  });
+  // Resolves to the list after the request, with the server still in it
+  // when the user said no.
+  ipcMain.handle('server-history:remove', async (e, url, action) => {
+    const { applied } = await requestServerListChange(e, { kind: 'remove', url }, action);
+    if (applied) closeBackgroundServerView(url);
+    return readServerList(store).history;
+  });
+  // opts.custom marks a name the user chose (true) or a return to the
+  // server's own name (false); without it the name is the one the page's
+  // own server reports, which never replaces one the user chose. Resolves
+  // to true when the list changed.
+  ipcMain.handle('server-history:update-name', async (e, url, name, opts, action) => {
+    const { applied, saved } = await requestServerListChange(e, { kind: 'rename', url, name, opts }, action);
+    return !!(applied && saved);
+  });
+  // The shared server list: servers in the user's order, removed servers and
+  // the order, so every server page shows the same list.
+  ipcMain.handle('server-list:get', (e) => {
+    if (!serverListReader(e)) return null;
+    return serverListView(readServerList(store));
+  });
+  ipcMain.on('server-list:get-sync', (e) => {
+    if (!serverListReader(e)) { e.returnValue = null; return; }
+    try {
+      e.returnValue = serverListView(readServerList(store));
+    } catch (err) {
+      console.warn('[Haven Desktop] Could not read the server list:', err.message);
+      e.returnValue = null;
+    }
+  });
+  // A new order needs no question: it only moves servers already listed.
+  ipcMain.handle('server-list:set-order', (e, urls) => {
+    if (!serverListSender(e)) return false;
+    const list = readServerList(store);
+    const before = JSON.stringify(list);
+    setOrder(list, urls);
+    return saveServerList(list, before);
+  });
+
+  // ── Server mute ───────────────────────────────────────
+  // Muting a server is the server's own account setting (it decides its
+  // notifications, and its push). Desktop keeps a copy per server so any
+  // server's sidebar can show which are muted, and so muting another server
+  // from its icon reaches that server's page, which then saves it there.
+  const MUTE_MODES = ['all', 'mentions'];
+  const muteKey = (url) => {
+    try { return new URL(String(url)).origin; } catch { return null; } // not a URL: refused
+  };
+  ipcMain.handle('server-mute:get-all', (e) => {
+    if (!serverListReader(e)) return {};
+    const all = store.get('serverMutes');
+    return all && typeof all === 'object' ? { ...all } : {};
+  });
+  ipcMain.handle('server-mute:set', (e, url, mode) => {
+    if (!serverListSender(e)) return false;
+    const key = muteKey(url);
+    if (!key) return false;
+    const all = { ...(store.get('serverMutes') || {}) };
+    const next = MUTE_MODES.includes(mode) ? mode : null;
+    if ((all[key] || null) === next) return true;
+    if (next) all[key] = next; else delete all[key];
+    store.set('serverMutes', all);
+    // The page on screen shows the change, and the muted server's own page
+    // saves it there; no other hidden page learns of it.
+    const targets = new Set([getActiveContents()]);
+    for (const [url, view] of serverViews) {
+      if (muteKey(url) === key) targets.add(view.webContents);
+    }
+    for (const contents of targets) safeSend(contents, 'server-mute:changed', { url: key, mode: next });
+    return true;
+  });
+
+  // ── External links ────────────────────────────────────
+  // Only the app's own screens use this; server pages open links through
+  // window.open, which has its own rules.
+  ipcMain.on('open-external', (e, url) => {
+    if (!fromAppScreen(e)) { refused('open-external'); return; }
+    // Only allow http/https URLs to prevent file:// or protocol handler abuse
+    if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
+      shell.openExternal(url);
+    }
+  });
+
+  // ── JavaScript dialog overrides for BrowserView (issue #6) ──
+
+  // The page waits on these with sendSync, as alert/confirm/prompt are
+  // modal by spec, but the app does not: the box is shown asynchronously and
+  // the answer goes back when the user picks. Only the server on screen may
+  // ask (a hidden one gets the "cancelled" answer straight away), and the
+  // title names the server asking, so one cannot pass for another.
+  const pageDialog = (event, kind, payload, cancelled, answer) => {
+    const serverUrl = getTrustedServerUrlForFrame(event.sender, event.senderFrame, { active: true });
+    if (!serverUrl || !mainWindow || mainWindow.isDestroyed()) {
+      refused(`dialog:${kind}`);
+      event.returnValue = cancelled;
+      return;
+    }
+    // Focus the window so the modal dialog is always visible; if it spawns
+    // behind the app, the user can't dismiss it and the app appears frozen.
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+    const message = String(payload?.message ?? '').slice(0, 4000);
+    const defaultValue = String(payload?.defaultValue ?? '').slice(0, 1000);
+    const options = {
+      type: kind === 'alert' ? 'info' : 'question',
+      buttons: kind === 'alert' ? [t('dialog.ok')] : [t('dialog.cancel'), t('dialog.ok')],
+      defaultId: kind === 'alert' ? 0 : 1,
+      cancelId: 0,
+      noLink: true,
+      title: t('dialog.fromServer', { host: dialogHost(serverUrl) }),
+      message,
+      detail: kind === 'prompt' && defaultValue ? t('dialog.defaultValue', { value: defaultValue }) : undefined,
+    };
+    dialog.showMessageBox(mainWindow, options)
+      .then(({ response }) => { event.returnValue = answer(response, defaultValue); })
+      .catch((err) => {
+        console.warn(`[Haven Desktop] ${kind} dialog failed:`, err?.message || err);
+        event.returnValue = cancelled;
+      });
+  };
+  ipcMain.on('dialog:alert', (event, payload) => pageDialog(event, 'alert', payload, true, () => true));
+  ipcMain.on('dialog:confirm', (event, payload) => pageDialog(event, 'confirm', payload, false, r => r === 1));
+  // Native Electron dialog: no cscript.exe, no execSync, no 5-minute timeout.
+  // It has no text box, so OK answers with the page's default value.
+  ipcMain.on('dialog:prompt', (event, payload) => pageDialog(event, 'prompt', payload, null, (r, value) => (r === 1 ? value : null)));
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// Linux Desktop Integration (issue #3)
+//
+// When running as an AppImage, install a .desktop entry and
+// icon so Haven appears in the application launcher.
+// ═══════════════════════════════════════════════════════════
+
+function installLinuxDesktopEntry() {
+  const appImagePath = process.env.APPIMAGE;
+  if (!appImagePath) return; // Only for AppImage installs
+
+  const home = process.env.HOME || os.homedir();
+  const appsDir = path.join(home, '.local', 'share', 'applications');
+  const iconDir = path.join(home, '.local', 'share', 'icons');
+  const desktopFile = path.join(appsDir, 'haven-desktop.desktop');
+  const iconDest = path.join(iconDir, 'haven-desktop.png');
+
+  // Skip if already registered for this AppImage path
+  if (fs.existsSync(desktopFile)) {
+    try {
+      const existingEntry = fs.readFileSync(desktopFile, 'utf-8');
+      const localizedComment = `Comment[pt_BR]=${translate('pt-BR', 'linux.desktopComment')}`;
+      if (existingEntry.includes(appImagePath) && existingEntry.includes(localizedComment)) return;
+    } catch {}
+  }
+
+  try {
+    fs.mkdirSync(appsDir, { recursive: true });
+    fs.mkdirSync(iconDir, { recursive: true });
+
+    if (fs.existsSync(ICON_PATH)) fs.copyFileSync(ICON_PATH, iconDest);
+
+    const entry = [
+      '[Desktop Entry]',
+      'Name=Haven',
+      `Comment=${translate('en', 'linux.desktopComment')}`,
+      `Comment[pt_BR]=${translate('pt-BR', 'linux.desktopComment')}`,
+      `Exec="${appImagePath}" %U`,
+      `Icon=${iconDest}`,
+      'Type=Application',
+      'Categories=Network;Chat;InstantMessaging;',
+      'Terminal=false',
+      'StartupWMClass=haven',
+    ].join('\n');
+
+    fs.writeFileSync(desktopFile, entry);
+    try { require('child_process').execSync(`update-desktop-database "${appsDir}" 2>/dev/null`, { timeout: 5000 }); } catch {}
+    console.log('[Haven Desktop] Installed desktop entry:', desktopFile);
+  } catch (err) {
+    console.warn('[Haven Desktop] Desktop integration failed:', err.message);
+  }
+}

@@ -1,0 +1,133 @@
+name: Build Haven Desktop (.exe, .AppImage, .deb, .dmg)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ─── Windows Build (.exe) ──────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --include=optional
+
+      - name: Build native audio addon
+        run: npm run build:native || echo "Native build skipped"
+
+      - name: Build Windows installer (.exe)
+        run: npx electron-builder --win --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: haven-desktop-windows
+          path: dist/*.exe
+
+  # ─── Linux Build (.AppImage & .deb) ────────────────────────
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Linux audio & GUI headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpulse-dev libx11-dev libxtst-dev libxinerama-dev libxt-dev libxrandr-dev libxfixes-dev xvfb
+
+      - name: Install dependencies
+        run: npm install --include=optional
+
+      - name: Build native audio addon
+        run: npm run build:native || echo "Native build skipped"
+
+      - name: Build Linux packages (.AppImage & .deb)
+        run: npx electron-builder --linux --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: haven-desktop-linux
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+
+  # ─── macOS Build (.dmg) ────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --include=optional
+
+      - name: Build native audio addon
+        run: npm run build:native || echo "Native build skipped"
+
+      - name: Build macOS installer (.dmg)
+        run: npx electron-builder --mac --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: haven-desktop-macos
+          path: dist/*.dmg
+
+  # ─── Release to GitHub ─────────────────────────────────────
+  release:
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all built installers
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || 'v1.8.4' }}
+          name: Haven Desktop ${{ github.ref_name || 'v1.8.4' }}
+          body: |
+            ## ⬡ Haven Desktop Official Release
+            
+            Official multi-platform client application for **Haven**:
+            
+            ### 📥 Download by Platform:
+            - **Windows**: `.exe` (NSIS One-Click Setup)
+            - **Linux**: `.AppImage` (Universal portable) & `.deb` (Debian/Ubuntu/Mint)
+            - **macOS**: `.dmg` (Apple Silicon & Intel)
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

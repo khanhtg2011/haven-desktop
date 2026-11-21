@@ -1,0 +1,293 @@
+// ═══════════════════════════════════════════════════════════
+// Haven Desktop: Audio Capture Manager
+//
+// Provides per-application audio capture via native addons:
+//   • Windows  →  WASAPI Process Loopback (build 19041+)
+//   • Linux    →  PulseAudio sink-input isolation
+//
+// The native addon (native/build/Release/haven_audio.node) is
+// compiled from C++ during `npm run build:native`.  If it is
+// missing, all methods degrade gracefully (no crash, no audio).
+// ═══════════════════════════════════════════════════════════
+
+const path = require('path');
+
+class AudioCaptureManager {
+  constructor(addon = null, beforeStop = null, t = key => key, timers = {}) {
+    this._t        = t;
+    this._addon    = addon;
+    this._beforeStop = beforeStop;
+    this._capturing = false;
+    this._generation = 0;
+    this._now = timers.now || Date.now;
+    this._setInterval = timers.setInterval || setInterval;
+    this._clearInterval = timers.clearInterval || clearInterval;
+    this._watchdogIntervalMs = timers.watchdogIntervalMs || 2000;
+    this._watchdogStallMs = timers.watchdogStallMs || 11000;
+    if (!this._addon) this._loadAddon();
+  }
+
+  // ── Load the compiled native module ─────────────────────
+  _loadAddon() {
+    const searchPaths = [
+      path.join(__dirname, '..', '..', 'native', 'build', 'Release', 'haven_audio.node'),
+      path.join(__dirname, '..', '..', 'native', 'build', 'Debug',   'haven_audio.node'),
+    ];
+
+    // When running from a packaged app, resources live in a different place
+    if (process.resourcesPath) {
+      searchPaths.push(path.join(process.resourcesPath, 'native', 'haven_audio.node'));
+    }
+
+    for (const p of searchPaths) {
+      try {
+        this._addon = require(p);
+        console.log(`[AudioCapture] Native addon loaded: ${p}`);
+        return;
+      } catch { /* try next */ }
+    }
+
+    console.warn('[AudioCapture] Native addon not found; per-app audio unavailable.');
+    console.warn('[AudioCapture] Run  npm run build:native  to compile it.');
+  }
+
+  // ── Public API ──────────────────────────────────────────
+
+  /** Is per-app capture supported on this OS? */
+  isSupported() {
+    if (!this._addon) return false;
+    try { return this._addon.isSupported(); }
+    catch { return false; }
+  }
+
+  /**
+   * List applications currently producing audio.
+   * @returns {Array<{pid:number, name:string, icon?:string}>}
+   */
+  getAudioApplications() {
+    if (!this._addon) return [];
+    try {
+      return this._addon.getAudioApplications().map(app => ({
+        ...app,
+        name: app.name === 'Unknown' ? this._t('audio.unknownApplication') : app.name,
+        nameKey: app.name === 'Unknown' ? 'audio.unknownApplication' : undefined,
+      }));
+    }
+    catch (e) { console.error('[AudioCapture] getAudioApplications:', e); return []; }
+  }
+
+  /**
+   * The process behind each window handle (Windows only; [] elsewhere, or
+   * with an audio module built before this existed).
+   * @returns {Array<{hwnd:number, pid:number, name:string, identity:string}>}
+   */
+  getWindowProcesses(hwnds) {
+    if (!this._addon || typeof this._addon.getWindowProcesses !== 'function') return [];
+    try { return this._addon.getWindowProcesses(hwnds); }
+    catch (e) { console.warn('[AudioCapture] getWindowProcesses:', e.message); return []; }
+  }
+
+  _localizeStatus(status) {
+    if (!status?.message) return status;
+    const rawMessage = status.message;
+    const exact = new Map([
+      ['OpenProcess failed for target PID: process may have exited or be protected', 'audio.status.openProcessFailed'],
+      ['WASAPI activation timed out (>12s)', 'audio.status.wasapiTimeout'],
+      ['capture stopped', 'audio.status.captureStopped'],
+      ['ActivateAudioInterfaceAsync returned failure (process loopback API may be unavailable)', 'audio.status.wasapiUnavailable'],
+      ['Process loopback denied (target may be a protected/UWP process)', 'audio.status.wasapiDenied'],
+      ['ActivateCompleted reported failure', 'audio.status.wasapiActivationFailed'],
+      ['IAudioClient::Initialize failed for both preferred and mix formats', 'audio.status.wasapiFormatFailed'],
+      ['Initialize failed and GetMixFormat returned no format', 'audio.status.wasapiNoFormat'],
+      ['GetService(IAudioCaptureClient) failed', 'audio.status.wasapiServiceFailed'],
+      ['IAudioClient::Start failed', 'audio.status.wasapiStartFailed'],
+      ['WASAPI process loopback active', 'audio.status.wasapiActive'],
+      ['GetNextPacketSize repeatedly failed, aborting capture', 'audio.status.wasapiPacketFailed'],
+      ['GetBuffer repeatedly failed, aborting capture', 'audio.status.wasapiBufferFailed'],
+      ['Exclude-mode capture is not supported on Linux (PulseAudio/PipeWire)', 'audio.status.linuxExcludeUnsupported'],
+      ['pulse capture stopped', 'audio.status.pulseStopped'],
+      ['pa_context_connect failed (PulseAudio/PipeWire daemon not reachable)', 'audio.status.pulseUnavailable'],
+      ['pa_context_get_sink_input_info_list returned NULL', 'audio.status.pulseEnumerationFailed'],
+      ['pulse capture active', 'audio.status.pulseActive'],
+      ['Native audio capture stopped producing data', 'audio.status.captureStalled'],
+    ]);
+
+    // An addon built before these messages lost their dashes still sends the
+    // old wording, so map it onto the current keys.
+    const legacyMessage = rawMessage
+      .replace('target PID \u2014 process', 'target PID: process')
+      .replace('failed \u2014 aborting', 'failed, aborting');
+    let messageKey = exact.get(rawMessage) || exact.get(legacyMessage);
+    let messageValues = {};
+    if (!messageKey) {
+      const wasapiMatch = /^activating (EXCLUDE|INCLUDE)-mode process loopback for PID (\d+)$/.exec(rawMessage);
+      if (wasapiMatch) {
+        const modeKey = wasapiMatch[1] === 'EXCLUDE' ? 'audio.mode.exclude' : 'audio.mode.include';
+        messageKey = 'audio.status.activatingWasapi';
+        messageValues = {
+          mode: this._t(modeKey),
+          modeKey,
+          pid: wasapiMatch[2],
+        };
+      }
+
+      const pulseMatch = /^preparing pulse capture for PID (\d+)$/.exec(rawMessage);
+      if (!messageKey && pulseMatch) {
+        messageKey = 'audio.status.preparingPulse';
+        messageValues = { pid: pulseMatch[1] };
+      }
+
+      const inputMatch = /^No PulseAudio sink input found for PID (\d+) \(the app may have stopped producing audio\)$/.exec(rawMessage);
+      if (!messageKey && inputMatch) {
+        messageKey = 'audio.status.pulseInputMissing';
+        messageValues = { pid: inputMatch[1] };
+      }
+
+      const createMatch = /^pa_simple_new failed: (.+)$/.exec(rawMessage);
+      if (!messageKey && createMatch) {
+        messageKey = 'audio.status.pulseCreateFailed';
+        messageValues = { error: createMatch[1] };
+      }
+    }
+
+    if (messageKey) {
+      return {
+        ...status,
+        message: this._t(messageKey, messageValues),
+        messageKey,
+        messageValues,
+        rawMessage,
+      };
+    } else {
+      return status;
+    }
+  }
+
+  /**
+   * Start capturing audio.
+   * @param {number} pid               Target process ID
+   * @param {Object} opts              Capture options
+   * @param {'include'|'exclude'|'system'} [opts.mode='include']
+   *                                   include: capture FROM this PID tree
+   *                                   exclude: capture all system audio EXCEPT this PID tree
+   *                                   (native on Windows and Linux)
+   * @param {string} [opts.identity]   Process identity captured during enumeration
+   * @param {function} opts.onData     Receives (Float32Array, capturedAtMs) PCM chunks
+   * @param {function} [opts.onStatus] Receives {kind, message, code} status events.
+   *                                   kinds: 'starting' | 'started' | 'failed' | 'stopped'
+   * @returns {boolean} true if synchronous activation succeeded
+   */
+  startCapture(pid, opts) {
+    if (!this._addon) {
+      const error = new Error(this._t('audio.error.addonUnavailable'));
+      error.messageKey = 'audio.error.addonUnavailable';
+      throw error;
+    }
+
+    // Backwards-compatible: startCapture(pid, fn) → include-mode.
+    if (typeof opts === 'function') {
+      opts = { mode: 'include', onData: opts };
+    }
+    const requestedMode = opts && opts.mode;
+    const mode = requestedMode === 'exclude' || requestedMode === 'system'
+      ? requestedMode
+      : 'include';
+    const onData  = opts && opts.onData;
+    const onStatus = opts && opts.onStatus;
+    const identity = typeof opts?.identity === 'string' ? opts.identity : '';
+    if (typeof onData !== 'function') {
+      const error = new Error(this._t('audio.error.callbackRequired'));
+      error.messageKey = 'audio.error.callbackRequired';
+      throw error;
+    }
+
+    if (this._capturing) this.stopCapture();
+
+    const generation = ++this._generation;
+    this._capturing  = true;
+    this._lastDataAt = this._now();
+    this._initFailed = false;
+    this._lastStatus = null;
+
+    const dataWrap = (pcm, capturedAt) => {
+      if (!this._capturing || this._generation !== generation) return;
+      this._lastDataAt = this._now();
+      onData(pcm, capturedAt);
+    };
+
+    const statusWrap = (nativeStatus) => {
+      if (!this._capturing || this._generation !== generation) return;
+      const s = this._localizeStatus(nativeStatus);
+      this._lastStatus = s;
+      if (s && s.kind === 'failed') this._initFailed = true;
+      console.log(`[AudioCapture] native status: ${s?.kind} (code=0x${(s?.code >>> 0).toString(16)}): ${nativeStatus?.message}`);
+      if (onStatus) {
+        try { onStatus(s); } catch (e) { console.warn('[AudioCapture] onStatus threw:', e.message); }
+      }
+    };
+
+    try {
+      const ok = this._addon.startCapture(pid, mode, identity, dataWrap, statusWrap);
+      if (!ok) {
+        this._capturing = false;
+        const reason = this._lastStatus?.message || this._t('audio.error.startReturnedFalse');
+        console.warn(`[AudioCapture] start failed (mode=${mode}, pid=${pid}): ${reason}`);
+        return false;
+      }
+      console.log(`[AudioCapture] Capturing PID ${pid} (mode=${mode})`);
+
+      // Keep checking for the lifetime of the capture. Native heartbeats keep
+      // silent but healthy sources alive, while a dead backend is torn down.
+      this._watchdog = this._setInterval(() => {
+        if (this._capturing && this._generation === generation &&
+            this._now() - this._lastDataAt > this._watchdogStallMs) {
+          console.warn('[AudioCapture] No data received in 11s, stopping capture');
+          statusWrap({
+            kind: 'failed',
+            message: 'Native audio capture stopped producing data',
+            code: 0,
+          });
+          if (this._capturing && this._generation === generation) this.stopCapture();
+        }
+      }, this._watchdogIntervalMs);
+      this._watchdog.unref?.();
+
+      return true;
+    } catch (e) {
+      this._capturing = false;
+      throw e;
+    }
+  }
+
+  /** Stop active capture. */
+  stopCapture() {
+    this._clearInterval(this._watchdog);
+    this._generation++;
+    if (this._beforeStop) {
+      try { this._beforeStop(); } catch { /* */ }
+    }
+    if (this._addon && this._capturing) {
+      try { this._addon.stopCapture(); } catch { /* */ }
+    }
+    this._capturing = false;
+  }
+
+  /**
+   * Opt Haven's audio sessions out of Windows ducking.
+   * Call after audio starts playing (sessions must exist).
+   * @returns {number} number of sessions opted out
+   */
+  optOutOfDucking() {
+    if (!this._addon?.optOutOfDucking) return 0;
+    try { return this._addon.optOutOfDucking(); }
+    catch (e) { console.warn('[AudioCapture] optOutOfDucking:', e.message); return 0; }
+  }
+
+  /** Release all resources. */
+  cleanup() {
+    this.stopCapture();
+    if (this._addon?.cleanup) { try { this._addon.cleanup(); } catch { /* */ } }
+  }
+}
+
+module.exports = { AudioCaptureManager };

@@ -1,0 +1,77 @@
+appId: com.haven.desktop
+productName: Haven
+copyright: Copyright © 2024-2026 Haven
+
+publish:
+  - provider: github
+    owner: khanhtg2011
+    repo: haven-desktop
+    releaseType: release
+
+# AppImage runtime. The legacy toolset (0.0.0) relies on libfuse2 being
+# installed on the host, and Fedora and Ubuntu 24.04+ no longer ship it, so the
+# AppImage refused to open there with a "requires FUSE" error even with fuse3
+# present. 1.0.3 packs the static runtime, which needs no FUSE library at all.
+toolsets:
+  appimage: "1.0.3"
+
+directories:
+  output: dist
+  buildResources: assets
+
+files:
+  - "src/**/*"
+  - "assets/**/*"
+  - "native/build/Release/*.node"
+  - "node_modules/**/*"
+  - "!node_modules/**/build/Release/obj*"
+  - "package.json"
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: assets/icon.png
+
+nsis:
+  oneClick: true
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  runAfterFinish: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Haven
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  icon: assets/icon.png
+  category: Network;Chat;InstantMessaging
+  desktop:
+    entry:
+      Name: Haven
+      Comment: Private self-hosted chat
+      "Comment[pt_BR]": Conversa privada e auto-hospedada
+      Terminal: false
+
+deb:
+  afterInstall: assets/linux/postinst.sh
+
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
+  icon: assets/icon.png
+  category: public.app-category.social-networking
+  darkModeSupport: true
+
+extraResources:
+  - from: native/build/Release/
+    to: native/
+    filter:
+      - "*.node"
