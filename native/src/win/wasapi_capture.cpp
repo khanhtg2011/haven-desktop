@@ -436,6 +436,8 @@ namespace haven {
 
 WasapiCapture::WasapiCapture() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // Prioritize audio capture thread to prevent stuttering during high gaming/CPU load
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 }
 
 WasapiCapture::~WasapiCapture() {
@@ -753,6 +755,8 @@ void WasapiCapture::captureLoop() {
     };
 
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // Prioritize audio capture thread to prevent stuttering during high gaming/CPU load
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 
     // ── Set up process-loopback activation params ──────────
     AUDIOCLIENT_ACTIVATION_PARAMS acParams = {};

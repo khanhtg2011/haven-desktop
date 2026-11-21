@@ -134,8 +134,13 @@ if (storedLanguage && storedLanguage !== SYSTEM_LANGUAGE && storedLanguage !== '
 // ── Enable native Wayland and video encoding (must be before app.whenReady) ──
 const enabledFeatures = [
   'PlatformHEVCEncoderSupport',
+  'PlatformHEVCDecoderSupport',
   'WebRtcAllowH265Send',
   'WebRtcAV1HWEncode',
+  'WebRtcHideLocalIpsWithMdns',
+  'VaapiVideoDecoder',
+  'CanvasOopRasterization',
+  'ParallelDownloading',
 ];
 if (process.platform === 'linux') {
   enabledFeatures.push('UseOzonePlatform', 'WaylandWindowDecorations');
@@ -315,14 +320,13 @@ if (process.platform === 'win32') {
 // but the WGC ProcessFrame flood originates from the GPU process.
 app.commandLine.appendSwitch('disable-logging');
 
-// ── Memory management: keep the renderer lean (Optimized Electron) ──────────────
-app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256 --optimize_for_size --expose-gc');
-// Enable OOP rasterization and parallel downloading for smoother rendering
-app.commandLine.appendSwitch('enable-features', 'CanvasOopRasterization,ParallelDownloading');
-// Reduce GPU process memory usage: Haven doesn't need heavy GPU compositing
-app.commandLine.appendSwitch('disable-gpu-memory-buffer-video-frames');
+// ── Memory management & GPU Optimization: keep the renderer lean (Optimized Electron) ──────────────
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256 --optimize-for-size --expose-gc');
+// Hardware acceleration: enable zero-copy GPU video frames and rasterization
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+app.commandLine.appendSwitch('enable-zero-copy');
 // Limit image decode cache (large images/gifs can balloon memory)
-app.commandLine.appendSwitch('image-decode-ct', '3');
+app.commandLine.appendSwitch('image-decode-ct', '2');
 // NOTE: 'disable-renderer-backgrounding' was removed; it prevented Chromium
 // from throttling timers when the window was unfocused, causing all intervals
 // (clock, ping, server polling, voice analysers) to run at full speed 24/7.
@@ -1754,8 +1758,8 @@ function createAppWindow(serverUrl) {
       } catch {}
     });
 
-    // ── Proactive Memory Trimming on Minimize/Hide (Optimized Electron) ──
-    const trimIdleMemory = () => {
+    // ── Dynamic Chat Hibernation & Memory Flush (Voice-First Optimization) ──
+    const hibernateChatViews = () => {
       try {
         if (typeof global.gc === 'function') global.gc();
         if (activeServerUrl && serverViews.has(activeServerUrl)) {
@@ -1763,9 +1767,37 @@ function createAppWindow(serverUrl) {
           v?.webContents?.session?.clearCache().catch(() => {});
         }
       } catch {}
+
+      for (const view of serverViews.values()) {
+        try {
+          if (view.webContents && !view.webContents.isDestroyed()) {
+            view.webContents.send('chat:sleep');
+            // If this view is NOT actively in a voice call, throttle DOM & timers
+            if (!view.webContents._havenInVoice) {
+              view.webContents.setBackgroundThrottling(true);
+            }
+          }
+        } catch {}
+      }
     };
-    mainWindow.on('minimize', trimIdleMemory);
-    mainWindow.on('hide', trimIdleMemory);
+
+    const wakeChatViews = () => {
+      for (const view of serverViews.values()) {
+        try {
+          if (view.webContents && !view.webContents.isDestroyed()) {
+            view.webContents.send('chat:wake');
+            if (view === serverViews.get(activeServerUrl)) {
+              view.webContents.setBackgroundThrottling(false);
+            }
+          }
+        } catch {}
+      }
+    };
+
+    mainWindow.on('minimize', hibernateChatViews);
+    mainWindow.on('hide', hibernateChatViews);
+    mainWindow.on('restore', wakeChatViews);
+    mainWindow.on('show', wakeChatViews);
 
     // ── Minimize-to-tray: intercept close if enabled ──
     mainWindow.on('close', (e) => {
@@ -4364,6 +4396,54 @@ function registerIPC() {
     const url = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
     if (!url || !voiceOverlay?.enabled) return;
     setVoiceReport(e.sender, sanitizeVoiceReport(report, getHttpOrigin(url)));
+  });
+
+  // ── Real-Time Voice State & PowerSave Blocker (Decoupled Voice-First) ──
+  let voicePowerBlockerId = null;
+
+  ipcMain.on('voice:state-change', (e, payload) => {
+    const url = getTrustedServerUrlForFrame(e.sender, e.senderFrame);
+    if (!url) return;
+    const inVoice = !!(payload && payload.inVoice);
+    e.sender._havenInVoice = inVoice;
+
+    let anyInVoice = false;
+    for (const view of serverViews.values()) {
+      if (view.webContents && !view.webContents.isDestroyed() && view.webContents._havenInVoice) {
+        anyInVoice = true;
+        break;
+      }
+    }
+
+    if (anyInVoice) {
+      if (voicePowerBlockerId === null) {
+        try {
+          const { powerSaveBlocker } = require('electron');
+          voicePowerBlockerId = powerSaveBlocker.start('prevent-app-suspension');
+          console.log('[Haven Desktop] Real-time voice active: powerSaveBlocker started.');
+        } catch {}
+      }
+      try { e.sender.setBackgroundThrottling(false); } catch {}
+    } else {
+      if (voicePowerBlockerId !== null) {
+        try {
+          const { powerSaveBlocker } = require('electron');
+          powerSaveBlocker.stop(voicePowerBlockerId);
+          voicePowerBlockerId = null;
+          console.log('[Haven Desktop] Voice call ended: powerSaveBlocker stopped.');
+        } catch {}
+      }
+      if (mainWindow && (!mainWindow.isVisible() || mainWindow.isMinimized() || !mainWindow.isFocused())) {
+        try { e.sender.setBackgroundThrottling(true); } catch {}
+      }
+    }
+  });
+
+  ipcMain.on('chat:request-soft-reload', (e) => {
+    if (!fromAnyServer(e)) return;
+    try {
+      e.sender.send('chat:soft-reload');
+    } catch {}
   });
 
   // ── Settings ──────────────────────────────────────────

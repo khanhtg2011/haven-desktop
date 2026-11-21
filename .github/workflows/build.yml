@@ -120,12 +120,18 @@ jobs:
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name || 'v1.8.4' }}
-          name: Haven Desktop ${{ github.ref_name || 'v1.8.4' }}
+          tag_name: ${{ github.ref_name || 'v1.8.6' }}
+          name: Haven Desktop ${{ github.ref_name || 'v1.8.6' }}
           body: |
-            ## ⬡ Haven Desktop Official Release
+            ## ⬡ Haven Desktop v1.8.6 (Voice-First & Ultra-Optimized)
             
-            Official multi-platform client application for **Haven**:
+            Official multi-platform client application for **Haven** featuring deep performance optimizations:
+            
+            ### 🚀 What's New in v1.8.6:
+            - **Voice-First Architecture**: Voice audio & WebRTC run 100% unthrottled in background with `THREAD_PRIORITY_TIME_CRITICAL` capture and system `powerSaveBlocker`.
+            - **Chat Hibernation**: Background/minimized chat enters deep sleep (`content-visibility: hidden`, CSS animation pause, memory trim) saving significant RAM and CPU.
+            - **Seamless Chat Reload**: Chat can be soft-reloaded or re-synced at any time without dropping active voice channels.
+            - **Zero-Copy GPU Acceleration**: Direct3D / VA-API hardware video pipeline and GPU rasterization for ultra-smooth UI.
             
             ### 📥 Download by Platform:
             - **Windows**: `.exe` (NSIS One-Click Setup)

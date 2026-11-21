@@ -271,6 +271,12 @@ contextBridge.exposeInMainWorld('__havenDesktopPage', {
     if (json.length > 64 * 1024) return;
     ipcRenderer.send('voice-overlay:report', JSON.parse(json));
   },
+  // Real-time voice state notification for unthrottled audio & power management
+  reportVoiceState: (inVoice, channelCode) => {
+    ipcRenderer.send('voice:state-change', { inVoice: inVoice === true, channelCode: String(channelCode || '') });
+  },
+  // Soft reload chat without dropping voice
+  softReloadChat: () => ipcRenderer.send('chat:request-soft-reload'),
 });
 
 // Events from main that the page world acts on.
@@ -278,6 +284,7 @@ for (const channel of [
   'voice:mute-toggle', 'voice:deafen-toggle', 'voice:ptt-toggle', 'voice:ptt-down', 'voice:ptt-up',
   'voice:ptm-down', 'voice:ptm-up', 'music:media-key', 'voice-overlay:enabled', 'app-activity:update',
   'notification-clicked', 'app:navigate-deep-link', 'screen:prepare-share', 'screen:prepare-share-cancel',
+  'chat:sleep', 'chat:wake', 'chat:soft-reload',
 ]) {
   ipcRenderer.on(channel, (_event, payload) => toPageWorld(channel, payload));
 }

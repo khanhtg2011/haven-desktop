@@ -708,6 +708,93 @@ function installPageWorld(bridge, deps) {
     }));
   });
 
+  // ─── Voice-First Decoupled Optimization: Continuous Voice State Sync ──────
+  (function initVoiceTracker() {
+    let lastInVoice = null;
+    let lastChannel = null;
+
+    function checkVoice() {
+      try {
+        const app = window.app || window._havenApp;
+        const v = app && app.voice;
+        const inVoice = !!(v && v.inVoice);
+        const channel = inVoice ? (v.currentChannel || '') : '';
+        if (inVoice !== lastInVoice || channel !== lastChannel) {
+          lastInVoice = inVoice;
+          lastChannel = channel;
+          bridge.reportVoiceState?.(inVoice, channel);
+        }
+      } catch {}
+    }
+
+    setInterval(checkVoice, 500);
+  })();
+
+  // ─── Chat Hibernation (Sleep) & Soft-Reload Handlers ─────────
+  try {
+    const style = document.createElement('style');
+    style.id = 'haven-desktop-hibernation-style';
+    style.textContent = `
+      html.haven-chat-sleeping * {
+        animation-play-state: paused !important;
+        transition: none !important;
+      }
+      html.haven-chat-sleeping #messages img,
+      html.haven-chat-sleeping .chat-messages img,
+      html.haven-chat-sleeping .message-embed {
+        content-visibility: hidden !important;
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  } catch {}
+
+  on('chat:sleep', () => {
+    try {
+      document.documentElement.classList.add('haven-chat-sleeping');
+      const videos = document.querySelectorAll('#messages video, .chat-messages video');
+      videos.forEach(v => { try { v.pause(); } catch {} });
+
+      const msgList = document.getElementById('messages') || document.querySelector('.chat-messages');
+      if (msgList && msgList.children.length > 50) {
+        while (msgList.children.length > 25) {
+          msgList.removeChild(msgList.firstChild);
+        }
+      }
+    } catch (e) {
+      console.warn('[Haven Desktop] chat:sleep failed:', e);
+    }
+  });
+
+  on('chat:wake', () => {
+    try {
+      document.documentElement.classList.remove('haven-chat-sleeping');
+      const app = window.app || window._havenApp;
+      if (app && app.currentChannel) {
+        if (typeof app.loadMessages === 'function') {
+          app.loadMessages(app.currentChannel, { background: true });
+        }
+      }
+    } catch (e) {
+      console.warn('[Haven Desktop] chat:wake failed:', e);
+    }
+  });
+
+  on('chat:soft-reload', () => {
+    try {
+      const app = window.app || window._havenApp;
+      if (app && app.currentChannel) {
+        console.log('[Haven Desktop] Soft-reloading chat messages...');
+        if (typeof app.loadChannel === 'function') {
+          app.loadChannel(app.currentChannel);
+        } else if (typeof app.loadMessages === 'function') {
+          app.loadMessages(app.currentChannel);
+        }
+      }
+    } catch (e) {
+      console.warn('[Haven Desktop] chat:soft-reload failed:', e);
+    }
+  });
+
   // ─── Global voice shortcut triggers ──────────────────────
   on('voice:mute-toggle',   () => document.getElementById('voice-mute-btn')?.click());
   on('voice:deafen-toggle', () => document.getElementById('voice-deafen-btn')?.click());
