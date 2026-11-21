@@ -1,0 +1,31 @@
+# Node & Electron build
+node_modules/
+dist/
+build/
+*.exe
+*.AppImage
+*.deb
+*.dmg
+*.zip
+*.tar.gz
+
+# Environment & Secrets
+.env
+.env.*
+*.env
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+
+# Native build
+build/Release/
+*.node
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
