@@ -99,7 +99,6 @@ npm run build:linux
 ---
 
 ## 🤝 Ecosystem
-- **Haven Server**: [khanhtg2011/haven](https://github.com/khanhtg2011/haven)
 - **Haven Music Bot & Discord Bridge**: Lightweight WebRTC audio companion bots.
 
 ---
