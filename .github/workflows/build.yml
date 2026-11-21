@@ -28,16 +28,29 @@ jobs:
         continue-on-error: true
         run: npm run build:native
 
-      - name: Build Windows installer (.exe)
+      - name: Build Windows installer (.exe, portable, zip)
         run: npx electron-builder --win --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Code Signing Certificate & Sign Windows Executables
+        shell: pwsh
+        run: |
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Haven Desktop, O=Haven, C=VN" -CertStoreLocation "Cert:\CurrentUser\My" -NotAfter (Get-Date).AddYears(5)
+          Export-Certificate -Cert $cert -FilePath "dist/Haven-Desktop-CodeSigning.cer"
+          Get-ChildItem -Path dist -Recurse -Include *.exe | ForEach-Object {
+            Write-Host "Signing $($_.FullName)..."
+            Set-AuthenticodeSignature -FilePath $_.FullName -Certificate $cert -TimestampServer "http://timestamp.digicert.com"
+          }
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: haven-desktop-windows
-          path: dist/*.exe
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.cer
 
   # ─── Linux Build (.AppImage & .deb) ────────────────────────
   build-linux:
@@ -120,21 +133,27 @@ jobs:
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name || 'v1.8.6' }}
-          name: Haven Desktop ${{ github.ref_name || 'v1.8.6' }}
+          tag_name: ${{ github.ref_name || 'v1.8.7' }}
+          name: Haven Desktop ${{ github.ref_name || 'v1.8.7' }}
           body: |
-            ## ⬡ Haven Desktop v1.8.6 (Voice-First & Ultra-Optimized)
+            ## ⬡ Haven Desktop ${{ github.ref_name || 'v1.8.7' }} (Voice-First, Multi-Format & Signed)
             
-            Official multi-platform client application for **Haven** featuring deep performance optimizations:
+            Official multi-platform client application for **Haven** featuring deep performance optimizations & expanded format support:
             
-            ### 🚀 What's New in v1.8.6:
+            ### 🚀 What's New:
+            - **Multi-Format Windows Releases**: Added **Portable .zip** (extract & run immediately, bypasses SmartScreen / NSIS installer issues), **Portable .exe**, and signed **NSIS Installer**.
+            - **Authenticode Code Signing**: Windows executables are digitally signed with Authenticode signatures to prevent "This app can't run on your PC" / SmartScreen blocks. Public certificate `Haven-Desktop-CodeSigning.cer` included.
             - **Voice-First Architecture**: Voice audio & WebRTC run 100% unthrottled in background with `THREAD_PRIORITY_TIME_CRITICAL` capture and system `powerSaveBlocker`.
             - **Chat Hibernation**: Background/minimized chat enters deep sleep (`content-visibility: hidden`, CSS animation pause, memory trim) saving significant RAM and CPU.
             - **Seamless Chat Reload**: Chat can be soft-reloaded or re-synced at any time without dropping active voice channels.
             - **Zero-Copy GPU Acceleration**: Direct3D / VA-API hardware video pipeline and GPU rasterization for ultra-smooth UI.
             
             ### 📥 Download by Platform:
-            - **Windows**: `.exe` (NSIS One-Click Setup)
+            - **Windows**:
+              - 📦 `Haven-Setup-*.exe` (Standard NSIS installer, digitally signed)
+              - 🚀 `Haven-*-portable.exe` (Standalone portable single-executable)
+              - 🗜️ `Haven-*-win-x64.zip` (Portable ZIP archive - **Recommended if Windows installer blocks**! Extract & run `Haven.exe` directly!)
+              - 🔑 `Haven-Desktop-CodeSigning.cer` (Public Authenticode certificate)
             - **Linux**: `.AppImage` (Universal portable) & `.deb` (Debian/Ubuntu/Mint)
             - **macOS**: `.dmg` (Apple Silicon & Intel)
           files: release-assets/*
