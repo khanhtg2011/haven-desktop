@@ -25,7 +25,8 @@ jobs:
         run: npm install --include=optional
 
       - name: Build native audio addon
-        run: npm run build:native || echo "Native build skipped"
+        continue-on-error: true
+        run: npm run build:native
 
       - name: Build Windows installer (.exe)
         run: npx electron-builder --win --publish never
@@ -58,7 +59,8 @@ jobs:
         run: npm install --include=optional
 
       - name: Build native audio addon
-        run: npm run build:native || echo "Native build skipped"
+        continue-on-error: true
+        run: npm run build:native
 
       - name: Build Linux packages (.AppImage & .deb)
         run: npx electron-builder --linux --publish never
@@ -88,7 +90,8 @@ jobs:
         run: npm install --include=optional
 
       - name: Build native audio addon
-        run: npm run build:native || echo "Native build skipped"
+        continue-on-error: true
+        run: npm run build:native
 
       - name: Build macOS installer (.dmg)
         run: npx electron-builder --mac --publish never
