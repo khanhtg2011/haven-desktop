@@ -315,13 +315,10 @@ if (process.platform === 'win32') {
 // but the WGC ProcessFrame flood originates from the GPU process.
 app.commandLine.appendSwitch('disable-logging');
 
-// ── Memory management: keep the renderer lean ──────────────
-// The Oilpan OOM crash is in Chromium's C++ DOM-object allocator, which is
-// separate from V8's JS heap.  Raising V8 to 512 MB gives the RGB theme cycle,
-// canvas effects, and message rendering more headroom so the GC fires less
-// frequently (GC pauses were a significant contributor to the progressive
-// slowdown reported as "hover gets slower over 5 minutes").
-app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512');
+// ── Memory management: keep the renderer lean (Optimized Electron) ──────────────
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256 --optimize_for_size --expose-gc');
+// Enable OOP rasterization and parallel downloading for smoother rendering
+app.commandLine.appendSwitch('enable-features', 'CanvasOopRasterization,ParallelDownloading');
 // Reduce GPU process memory usage: Haven doesn't need heavy GPU compositing
 app.commandLine.appendSwitch('disable-gpu-memory-buffer-video-frames');
 // Limit image decode cache (large images/gifs can balloon memory)
@@ -1757,6 +1754,19 @@ function createAppWindow(serverUrl) {
       } catch {}
     });
 
+    // ── Proactive Memory Trimming on Minimize/Hide (Optimized Electron) ──
+    const trimIdleMemory = () => {
+      try {
+        if (typeof global.gc === 'function') global.gc();
+        if (activeServerUrl && serverViews.has(activeServerUrl)) {
+          const v = serverViews.get(activeServerUrl);
+          v?.webContents?.session?.clearCache().catch(() => {});
+        }
+      } catch {}
+    };
+    mainWindow.on('minimize', trimIdleMemory);
+    mainWindow.on('hide', trimIdleMemory);
+
     // ── Minimize-to-tray: intercept close if enabled ──
     mainWindow.on('close', (e) => {
       if (!app.isQuitting && store.get('minimizeToTray')) {
@@ -2640,13 +2650,10 @@ function ensureServerView(serverUrl, { background = false } = {}) {
     });
 
     // ── Periodic memory monitoring ──
-    // Checks renderer memory every 30 s.  Soft DOM trim at 500 MB,
-    // hard reload only at 1536 MB with a 5 min cooldown to prevent
-    // reload loops on media-heavy channels.  Hard reload is skipped
-    // entirely when the user is in voice or screen sharing; reloading
-    // while capturing would abruptly drop the call for all participants.
-    const MEM_THRESHOLD_MB = 1536;
-    const MEM_WARN_MB      = 500;
+    // Optimized Electron: Proactive memory management
+    // Soft DOM trim at 320 MB, hard reload threshold at 650 MB
+    const MEM_THRESHOLD_MB = 650;
+    const MEM_WARN_MB      = 320;
     const MEM_CHECK_INTERVAL = 30000;
     const MEM_RELOAD_COOLDOWN = 300000; // 5 min between hard reloads
     let _memCheckInterval = null;
@@ -2763,11 +2770,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
   return view;
 }
 
-// Default cap on how many secondary servers we'll pre-load in the background.
-// Each background view is a full Chromium renderer + Socket.IO connection, so
-// this is the dial that controls how memory-heavy the desktop app gets when
-// the user has lots of servers added.
-const BACKGROUND_SERVER_CAP = 8;
+// Optimized Electron: Cap background server preloads to 2 max to save hundreds of MBs of RAM.
+const BACKGROUND_SERVER_CAP = 2;
 
 function scheduleBackgroundServerPreload(activeServerUrl) {
   // Off-switch: setting `backgroundServerConnections` to false disables
@@ -3558,7 +3562,7 @@ function registerScreenShareHandler() {
       try {
         sources = await desktopCapturer.getSources({
           types: ['window', 'screen'],
-          thumbnailSize: { width: 320, height: 180 },
+          thumbnailSize: { width: 240, height: 135 },
           fetchWindowIcons: true,
         });
       } catch (err) {
