@@ -28,6 +28,18 @@ const OVERLAY_BRIDGE_SCRIPT: &str = r#"
 })();
 "#;
 
+#[cfg(target_os = "windows")]
+pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate,OptimizationHints,MediaRouter \
+    --use-fake-ui-for-media-stream \
+    --autoplay-policy=no-user-gesture-required \
+    --renderer-process-limit=1 \
+    --enable-low-end-device-mode \
+    --js-flags=\"--max-old-space-size=96 --lite-mode\" \
+    --disk-cache-size=16777216 \
+    --disable-background-networking \
+    --disable-component-update \
+    --disable-domain-reliability";
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -41,9 +53,15 @@ pub fn run() {
             let app_handle = app.handle();
             let _ = tray::setup_tray(app_handle);
 
-            // 1. Construct Main Window from config and bind system-level initialization script + auto permissions
+            // 1. Construct Main Window from config, bind browser optimization arguments, bridge script & auto-permissions
             if let Some(win_cfg) = app.config().app.windows.first() {
                 let mut builder = WebviewWindowBuilder::from_config(app_handle, win_cfg)?;
+
+                #[cfg(target_os = "windows")]
+                {
+                    builder = builder.additional_browser_args(BROWSER_ARGS);
+                }
+
                 builder = builder
                     .initialization_script(BRIDGE_SCRIPT)
                     .on_permission_request(|_webview, _kind| PermissionResponse::Allow);
@@ -68,7 +86,7 @@ pub fn run() {
             }
 
             // 2. Construct In-Game Voice Overlay Window (Always-on-top, Click-Through)
-            let overlay_builder = WebviewWindowBuilder::new(
+            let mut overlay_builder = WebviewWindowBuilder::new(
                 app_handle,
                 "overlay",
                 WebviewUrl::App("voice-overlay.html".into()),
@@ -85,9 +103,23 @@ pub fn run() {
             .visible(false)
             .initialization_script(OVERLAY_BRIDGE_SCRIPT);
 
+            #[cfg(target_os = "windows")]
+            {
+                overlay_builder = overlay_builder.additional_browser_args(BROWSER_ARGS);
+            }
+
             if let Ok(overlay_win) = overlay_builder.build() {
                 let _ = overlay_win.set_ignore_cursor_events(true);
             }
+
+            // 3. Periodic Background RAM Working Set Trimmer
+            // Runs every 30s silently to flush unused memory pages from WebView2 processes
+            std::thread::spawn(|| {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    tray::trim_working_set();
+                }
+            });
 
             log::info!("Haven Desktop 2.0 (Tauri v2 + Rust) loaded with full parity & Voice Overlay!");
             Ok(())

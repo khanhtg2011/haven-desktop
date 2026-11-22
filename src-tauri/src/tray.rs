@@ -47,71 +47,81 @@ extern "system" {
     fn CloseHandle(hObject: isize) -> i32;
 }
 
-pub fn trim_working_set() {
+/// Recursively discovers all child and grandchild processes of root_pid (e.g. all msedgewebview2.exe subprocesses)
+pub fn get_descendant_pids(root_pid: u32) -> Vec<u32> {
+    let mut pids = vec![root_pid];
     #[cfg(target_os = "windows")]
     unsafe {
-        // Trim main Haven process
-        K32EmptyWorkingSet(GetCurrentProcess());
-
-        // Trim all WebView2 subprocesses
-        let my_pid = GetCurrentProcessId();
         let snapshot = CreateToolhelp32Snapshot(0x00000002, 0); // TH32CS_SNAPPROCESS
         if snapshot != -1 && snapshot != 0 {
-            let mut entry = std::mem::zeroed::<PROCESSENTRY32W>();
-            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-            if Process32FirstW(snapshot, &mut entry) != 0 {
-                loop {
-                    if entry.th32ParentProcessID == my_pid {
-                        let child_handle = OpenProcess(0x0100 | 0x0400, 0, entry.th32ProcessID);
-                        if child_handle != 0 {
-                            K32EmptyWorkingSet(child_handle);
-                            CloseHandle(child_handle);
+            let mut added_new = true;
+            while added_new {
+                added_new = false;
+                let mut entry = std::mem::zeroed::<PROCESSENTRY32W>();
+                entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+                if Process32FirstW(snapshot, &mut entry) != 0 {
+                    loop {
+                        if pids.contains(&entry.th32ParentProcessID) && !pids.contains(&entry.th32ProcessID) {
+                            pids.push(entry.th32ProcessID);
+                            added_new = true;
                         }
-                    }
-                    if Process32NextW(snapshot, &mut entry) == 0 {
-                        break;
+                        if Process32NextW(snapshot, &mut entry) == 0 {
+                            break;
+                        }
                     }
                 }
             }
             CloseHandle(snapshot);
         }
     }
+    pids
 }
 
+/// Flushes working set pages for Haven AND all descendant WebView2 processes (Browser, GPU, Renderer, Audio, Utility)
+pub fn trim_working_set() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let my_pid = GetCurrentProcessId();
+        let family_pids = get_descendant_pids(my_pid);
+        for pid in family_pids {
+            let handle = if pid == my_pid {
+                GetCurrentProcess()
+            } else {
+                OpenProcess(0x0100 | 0x0400, 0, pid)
+            };
+            if handle != 0 {
+                K32EmptyWorkingSet(handle);
+                if pid != my_pid {
+                    CloseHandle(handle);
+                }
+            }
+        }
+    }
+}
+
+/// Calculates actual total physical RAM consumed by Haven and all of its WebView2 instances
 pub fn get_current_ram_mb() -> usize {
     #[cfg(target_os = "windows")]
     unsafe {
-        let mut total_bytes = 0usize;
-        let mut counters: ProcessMemoryCounters = std::mem::zeroed();
-        counters.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
-        if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) != 0 {
-            total_bytes += counters.working_set_size;
-        }
-
         let my_pid = GetCurrentProcessId();
-        let snapshot = CreateToolhelp32Snapshot(0x00000002, 0);
-        if snapshot != -1 && snapshot != 0 {
-            let mut entry = std::mem::zeroed::<PROCESSENTRY32W>();
-            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-            if Process32FirstW(snapshot, &mut entry) != 0 {
-                loop {
-                    if entry.th32ParentProcessID == my_pid {
-                        let child_handle = OpenProcess(0x0400, 0, entry.th32ProcessID);
-                        if child_handle != 0 {
-                            let mut child_counters: ProcessMemoryCounters = std::mem::zeroed();
-                            child_counters.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
-                            if K32GetProcessMemoryInfo(child_handle, &mut child_counters, child_counters.cb) != 0 {
-                                total_bytes += child_counters.working_set_size;
-                            }
-                            CloseHandle(child_handle);
-                        }
-                    }
-                    if Process32NextW(snapshot, &mut entry) == 0 {
-                        break;
-                    }
+        let family_pids = get_descendant_pids(my_pid);
+        let mut total_bytes = 0usize;
+        for pid in family_pids {
+            let handle = if pid == my_pid {
+                GetCurrentProcess()
+            } else {
+                OpenProcess(0x0400, 0, pid)
+            };
+            if handle != 0 {
+                let mut counters: ProcessMemoryCounters = std::mem::zeroed();
+                counters.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+                if K32GetProcessMemoryInfo(handle, &mut counters, counters.cb) != 0 {
+                    total_bytes += counters.working_set_size;
+                }
+                if pid != my_pid {
+                    CloseHandle(handle);
                 }
             }
-            CloseHandle(snapshot);
         }
         return total_bytes / (1024 * 1024);
     }
@@ -236,7 +246,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             }
             "trim_ram" => {
                 trim_working_set();
-                log::info!("Deep RAM working set trim triggered");
+                log::info!("Full recursive RAM working set trim triggered");
             }
             "toggle_autostart" => {
                 let enabled = toggle_autostart();
