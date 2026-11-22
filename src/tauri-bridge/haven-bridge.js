@@ -6,120 +6,7 @@
 (function () {
   'use strict';
 
-  // 1. Stamp desktop identification attributes on <html> and <body>
-  try {
-    if (document.documentElement) {
-      document.documentElement.setAttribute('data-desktop-app', 'true');
-      document.documentElement.setAttribute('data-platform', 'win32');
-    }
-  } catch (_) {}
-
-  // 2. Triple-Layer Auto-Grant Device Permissions (Microphone, Camera, Notifications)
-  // Completely eliminates any browser permission prompts
-  try {
-    if (navigator.permissions && navigator.permissions.query) {
-      const originalQuery = navigator.permissions.query.bind(navigator.permissions);
-      navigator.permissions.query = function (param) {
-        if (param && ['microphone', 'camera', 'notifications', 'speaker-selection', 'clipboard-read', 'clipboard-write'].includes(param.name)) {
-          return Promise.resolve({
-            state: 'granted',
-            name: param.name,
-            onchange: null,
-            addEventListener: () => {},
-            removeEventListener: () => {},
-            dispatchEvent: () => false,
-          });
-        }
-        return originalQuery(param);
-      };
-    }
-
-    if (typeof window.Notification !== 'undefined') {
-      window.Notification.requestPermission = () => Promise.resolve('granted');
-      try {
-        Object.defineProperty(window.Notification, 'permission', {
-          get: () => 'granted',
-          configurable: true,
-        });
-      } catch (_) {}
-    }
-  } catch (err) {
-    console.warn('[Haven Desktop] Permission auto-grant shim warning:', err);
-  }
-
-  // 3. Permanently suppress web promo popups & seed welcome flags
-  try {
-    localStorage.setItem('promo_seen_desktop', '1');
-    const welcomeKey = 'haven_welcome_seen_v1';
-    let seen = {};
-    try { seen = JSON.parse(localStorage.getItem(welcomeKey) || '{}'); } catch (_) {}
-    seen.desktop_app_promo = true;
-    localStorage.setItem(welcomeKey, JSON.stringify(seen));
-
-    const style = document.createElement('style');
-    style.id = 'haven-desktop-injected-style';
-    style.textContent = `
-      #desktop-promo-modal,
-      .modal-overlay.desktop-promo,
-      .desktop-promo,
-      #desktop-app-banner {
-        display: none !important;
-        visibility: hidden !important;
-        opacity: 0 !important;
-        pointer-events: none !important;
-      }
-    `;
-    if (document.head) {
-      document.head.appendChild(style);
-    } else {
-      document.addEventListener('DOMContentLoaded', () => {
-        if (!document.getElementById('haven-desktop-injected-style') && document.head) {
-          document.head.appendChild(style);
-        }
-      });
-    }
-  } catch (_) {}
-
-  // 4. Desktop Keyboard Navigation & Shortcuts
-  window.addEventListener('keydown', (e) => {
-    // F5 or Ctrl+R: Refresh page
-    if (e.key === 'F5' || (e.ctrlKey && (e.key === 'r' || e.key === 'R'))) {
-      e.preventDefault();
-      window.location.reload();
-      return;
-    }
-    // Alt+Left: History back
-    if (e.altKey && e.key === 'ArrowLeft') {
-      e.preventDefault();
-      window.history.back();
-      return;
-    }
-    // Alt+Right: History forward
-    if (e.altKey && e.key === 'ArrowRight') {
-      e.preventDefault();
-      window.history.forward();
-      return;
-    }
-    // F11: Fullscreen toggle
-    if (e.key === 'F11') {
-      e.preventDefault();
-      if (!document.fullscreenElement) {
-        document.documentElement.requestFullscreen().catch(() => {});
-      } else {
-        document.exitFullscreen().catch(() => {});
-      }
-      return;
-    }
-    // Ctrl+Shift+O: Toggle Voice Overlay
-    if (e.ctrlKey && e.shiftKey && (e.key === 'o' || e.key === 'O')) {
-      e.preventDefault();
-      if (window.__TAURI__ && window.__TAURI__.core) {
-        window.__TAURI__.core.invoke('toggle_voice_overlay_command');
-      }
-    }
-  }, true);
-
-  // 5. Tauri IPC invoke helper
+  // 1. Tauri IPC invoke helper
   const invoke = (cmd, args = {}) => {
     if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
       return window.__TAURI__.core.invoke(cmd, args);
@@ -127,7 +14,7 @@
     return Promise.resolve(null);
   };
 
-  // 6. Build window.havenDesktop API
+  // 2. Build window.havenDesktop API immediately (evaluated before any web scripts)
   const havenDesktop = {
     platform: 'win32',
     isDesktopApp: true,
@@ -151,7 +38,6 @@
       },
     },
 
-    // Voice Overlay Bridge methods
     voiceOverlayEnabled: async () => {
       try {
         const res = await invoke('is_voice_overlay_enabled');
@@ -271,7 +157,7 @@
     },
   };
 
-  // Expose API globally
+  // 3. Expose Haven Desktop & Electron APIs globally so client code recognizes desktop environment
   window.havenDesktop = havenDesktop;
   window.electronAPI = havenDesktop;
   window.havenAPI = {
@@ -281,13 +167,181 @@
     notify: havenDesktop.notify,
   };
 
-  // 7. Voice Overlay Reporter Engine
+  // Mock navigator.userAgent to always signal desktop app
+  try {
+    const rawUA = navigator.userAgent;
+    if (!rawUA.includes('Electron')) {
+      Object.defineProperty(navigator, 'userAgent', {
+        get: () => `${rawUA} Electron/32.0.0 HavenDesktop/2.0.0`,
+        configurable: true,
+      });
+    }
+  } catch (_) {}
+
+  // 4. Stamp desktop identification attributes on <html> and <body>
+  try {
+    if (document.documentElement) {
+      document.documentElement.setAttribute('data-desktop-app', 'true');
+      document.documentElement.setAttribute('data-platform', 'win32');
+    }
+  } catch (_) {}
+
+  // 5. Triple-Layer Auto-Grant Device Permissions (Microphone, Camera, Notifications)
+  // Completely eliminates any browser permission prompts
+  try {
+    if (navigator.permissions && navigator.permissions.query) {
+      const originalQuery = navigator.permissions.query.bind(navigator.permissions);
+      navigator.permissions.query = function (param) {
+        if (param && ['microphone', 'camera', 'notifications', 'speaker-selection', 'clipboard-read', 'clipboard-write'].includes(param.name)) {
+          return Promise.resolve({
+            state: 'granted',
+            name: param.name,
+            onchange: null,
+            addEventListener: () => {},
+            removeEventListener: () => {},
+            dispatchEvent: () => false,
+          });
+        }
+        return originalQuery(param);
+      };
+    }
+
+    if (typeof window.Notification !== 'undefined') {
+      window.Notification.requestPermission = () => Promise.resolve('granted');
+      try {
+        Object.defineProperty(window.Notification, 'permission', {
+          get: () => 'granted',
+          configurable: true,
+        });
+      } catch (_) {}
+    }
+  } catch (err) {
+    console.warn('[Haven Desktop] Permission auto-grant shim warning:', err);
+  }
+
+  // 6. Permanently suppress web promo popups, seed welcome flags, and eradicate promo modals
+  try {
+    localStorage.setItem('haven_desktop_promo_dismissed', '1');
+    localStorage.setItem('promo_seen_desktop', '1');
+    localStorage.setItem('haven_ab_promo_nodisplay', '1');
+    localStorage.setItem('haven_ab_banner_nodisplay', '1');
+    localStorage.setItem('haven_promo_prefs_migrated', '1');
+
+    const welcomeKey = 'haven_welcome_seen_v1';
+    let seen = {};
+    try { seen = JSON.parse(localStorage.getItem(welcomeKey) || '{}') || {}; } catch (_) {}
+    seen.desktop_app_promo = true;
+    seen.android_app_promo = true;
+    localStorage.setItem(welcomeKey, JSON.stringify(seen));
+
+    // Force hide with high-specificity CSS
+    const style = document.createElement('style');
+    style.id = 'haven-desktop-injected-style';
+    style.textContent = `
+      #desktop-promo-modal,
+      #android-beta-modal,
+      #android-beta-banner,
+      .desktop-promo,
+      .android-beta-promo,
+      .modal-overlay.desktop-promo {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+        width: 0 !important;
+        height: 0 !important;
+      }
+    `;
+    if (document.head) {
+      document.head.appendChild(style);
+    } else {
+      document.addEventListener('DOMContentLoaded', () => {
+        if (!document.getElementById('haven-desktop-injected-style') && document.head) {
+          document.head.appendChild(style);
+        }
+      });
+    }
+
+    // Actively remove promo modals from DOM so they cannot appear even for a single frame
+    const purgeModals = () => {
+      const ids = ['desktop-promo-modal', 'android-beta-modal', 'android-beta-banner'];
+      for (const id of ids) {
+        const el = document.getElementById(id);
+        if (el) el.remove();
+      }
+    };
+    purgeModals();
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', purgeModals);
+    }
+    try {
+      const observer = new MutationObserver(purgeModals);
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+    } catch (_) {}
+
+    // Persist promo dismissed to user account when socket connects
+    const syncPromoPreferences = () => {
+      if (window.app && window.app.socket && typeof window.app.socket.emit === 'function') {
+        window.app.socket.emit('set-preference', { key: 'promo_seen_desktop', value: 'true' });
+        window.app.socket.emit('set-preference', { key: 'promo_seen_android', value: 'true' });
+        window.app.socket.emit('set-preference', { key: 'android_banner_seen', value: 'true' });
+        return true;
+      }
+      return false;
+    };
+    if (!syncPromoPreferences()) {
+      const syncInterval = setInterval(() => {
+        if (syncPromoPreferences()) clearInterval(syncInterval);
+      }, 1000);
+      setTimeout(() => clearInterval(syncInterval), 30000);
+    }
+  } catch (_) {}
+
+  // 7. Desktop Keyboard Navigation & Shortcuts
+  window.addEventListener('keydown', (e) => {
+    // F5 or Ctrl+R: Refresh page
+    if (e.key === 'F5' || (e.ctrlKey && (e.key === 'r' || e.key === 'R'))) {
+      e.preventDefault();
+      window.location.reload();
+      return;
+    }
+    // Alt+Left: History back
+    if (e.altKey && e.key === 'ArrowLeft') {
+      e.preventDefault();
+      window.history.back();
+      return;
+    }
+    // Alt+Right: History forward
+    if (e.altKey && e.key === 'ArrowRight') {
+      e.preventDefault();
+      window.history.forward();
+      return;
+    }
+    // F11: Fullscreen toggle
+    if (e.key === 'F11') {
+      e.preventDefault();
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+      return;
+    }
+    // Ctrl+Shift+O: Toggle Voice Overlay
+    if (e.ctrlKey && e.shiftKey && (e.key === 'o' || e.key === 'O')) {
+      e.preventDefault();
+      if (window.__TAURI__ && window.__TAURI__.core) {
+        window.__TAURI__.core.invoke('toggle_voice_overlay_command');
+      }
+    }
+  }, true);
+
+  // 8. Voice Overlay Reporter Engine
   // Automatically gathers voice activity, member speaking highlights, and channel chat
   (function initVoiceOverlayReporter() {
     let lastSent = '';
     let socket = null;
     let rosters = Object.create(null);
-    let asked = Object.create(null);
     const messages = [];
     let seq = 0;
 
@@ -295,7 +349,6 @@
       if (!app.socket || app.socket === socket || typeof app.socket.on !== 'function') return;
       socket = app.socket;
       rosters = Object.create(null);
-      asked = Object.create(null);
 
       socket.on('voice-users-update', (d) => {
         if (d && typeof d.channelCode === 'string' && Array.isArray(d.users)) {

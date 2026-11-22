@@ -56,10 +56,12 @@ pub fn run() {
                         tauri::WindowEvent::CloseRequested { api, .. } => {
                             api.prevent_close();
                             let _ = win_clone.hide();
+                            let _ = win_clone.eval("if (window.gc) window.gc();");
                             tray::trim_working_set();
                         }
                         tauri::WindowEvent::Focused(false) => {
                             // Deep Working Set Trim when user is gaming or switching windows
+                            let _ = win_clone.eval("if (window.gc) window.gc();");
                             tray::trim_working_set();
                         }
                         _ => {}
@@ -90,15 +92,22 @@ pub fn run() {
             }
 
             // 3. Periodic Background RAM Working Set Trimmer
-            // Runs every 30s silently to flush unused memory pages from all WebView2 processes
-            std::thread::spawn(|| {
+            // Triggers V8 JS Garbage Collection and flushes working set across all WebView2 processes every 30s
+            let bg_app = app_handle.clone();
+            std::thread::spawn(move || {
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(30));
+                    if let Some(main_win) = bg_app.get_webview_window("main") {
+                        let _ = main_win.eval("if (window.gc) window.gc();");
+                    }
+                    if let Some(overlay_win) = bg_app.get_webview_window("overlay") {
+                        let _ = overlay_win.eval("if (window.gc) window.gc();");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(150));
                     tray::trim_working_set();
                 }
             });
 
-            log::info!("Haven Desktop 2.0 (Tauri v2 + Rust) loaded with full parity & Voice Overlay!");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -108,19 +117,18 @@ pub fn run() {
             window_close,
             get_shortcuts_config,
             set_shortcuts_config,
-            update_voice_state,
-            is_voice_overlay_enabled,
-            set_voice_overlay_enabled,
-            toggle_voice_overlay_command,
-            report_voice_overlay,
-            voice_overlay_done,
-            voice_overlay_set_editing,
-            voice_overlay_snap,
-            is_audio_capture_supported,
             stop_audio_capture,
             get_server_history,
-            switch_server
+            switch_server,
+            update_voice_state,
+            report_voice_overlay,
+            is_voice_overlay_enabled,
+            set_voice_overlay_enabled,
+            voice_overlay_set_editing,
+            voice_overlay_snap,
+            toggle_voice_overlay_command,
+            voice_overlay_done
         ])
         .run(tauri::generate_context!())
-        .expect("error while building tauri application");
+        .expect("error while running haven desktop application");
 }

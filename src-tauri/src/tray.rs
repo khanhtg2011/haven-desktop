@@ -40,6 +40,7 @@ extern "system" {
     fn GetCurrentProcessId() -> u32;
     fn K32GetProcessMemoryInfo(process: isize, pps_mem_counters: *mut ProcessMemoryCounters, cb: u32) -> i32;
     fn K32EmptyWorkingSet(process: isize) -> i32;
+    fn SetProcessWorkingSetSize(process: isize, min: usize, max: usize) -> i32;
     fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) -> isize;
     fn Process32FirstW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
     fn Process32NextW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
@@ -94,9 +95,15 @@ pub fn trim_working_set() {
             let handle = if pid == my_pid {
                 GetCurrentProcess()
             } else {
-                OpenProcess(0x0100 | 0x0400, 0, pid)
+                let h = OpenProcess(0x0100 | 0x0400 | 0x0010, 0, pid);
+                if h == 0 {
+                    OpenProcess(0x1F0FFF, 0, pid)
+                } else {
+                    h
+                }
             };
             if handle != 0 {
+                SetProcessWorkingSetSize(handle, usize::MAX, usize::MAX);
                 K32EmptyWorkingSet(handle);
                 if pid != my_pid {
                     CloseHandle(handle);
@@ -160,43 +167,37 @@ pub fn toggle_autostart() -> bool {
                 .args(["delete", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "/v", "HavenDesktop", "/f"])
                 .creation_flags(0x08000000)
                 .output();
-            return false;
-        } else if let Ok(exe_path) = std::env::current_exe() {
-            let exe_str = exe_path.to_string_lossy().to_string();
-            let _ = std::process::Command::new("reg")
-                .args([
-                    "add",
-                    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-                    "/v",
-                    "HavenDesktop",
-                    "/t",
-                    "REG_SZ",
-                    "/d",
-                    &format!("\"{}\"", exe_str),
-                    "/f",
-                ])
-                .creation_flags(0x08000000)
-                .output();
-            return true;
+            false
+        } else {
+            if let Ok(current_exe) = std::env::current_exe() {
+                let path_str = current_exe.to_string_lossy().to_string();
+                let reg_val = format!("\"{}\"", path_str);
+                let _ = std::process::Command::new("reg")
+                    .args(["add", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run", "/v", "HavenDesktop", "/t", "REG_SZ", "/d", &reg_val, "/f"])
+                    .creation_flags(0x08000000)
+                    .output();
+                return true;
+            }
+            false
         }
     }
+    #[cfg(not(target_os = "windows"))]
     false
 }
 
-pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let open_i = MenuItem::with_id(app, "open", "Mở Haven", true, None::<&str>)?;
     let reload_i = MenuItem::with_id(app, "reload", "Tải lại trang (F5)", true, None::<&str>)?;
     let trim_i = MenuItem::with_id(app, "trim_ram", "Giải phóng RAM ngay", true, None::<&str>)?;
 
-    let autostart_label = if is_autostart_enabled() {
+    let autostart_text = if is_autostart_enabled() {
         "Khởi động cùng Windows: [BẬT]"
     } else {
         "Khởi động cùng Windows: [TẮT]"
     };
-    let autostart_i = MenuItem::with_id(app, "toggle_autostart", autostart_label, true, None::<&str>)?;
+    let autostart_i = MenuItem::with_id(app, "toggle_autostart", autostart_text, true, None::<&str>)?;
 
-    // Voice Overlay Submenu
-    let overlay_toggle_i = MenuItem::with_id(app, "toggle_overlay", "Bật/Tắt Voice Overlay (Ctrl+Shift+O)", true, None::<&str>)?;
+    let overlay_toggle_i = MenuItem::with_id(app, "toggle_overlay", "Bật/Tắt Voice Overlay", true, None::<&str>)?;
     let overlay_move_i = MenuItem::with_id(app, "move_overlay", "Di chuyển vị trí Overlay", true, None::<&str>)?;
     let snap_tl_i = MenuItem::with_id(app, "snap_tl", "Góc trên - Bên trái", true, None::<&str>)?;
     let snap_tr_i = MenuItem::with_id(app, "snap_tr", "Góc trên - Bên phải", true, None::<&str>)?;
@@ -252,8 +253,19 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "trim_ram" => {
-                trim_working_set();
-                log::info!("Full recursive RAM working set trim triggered");
+                let app_c = app.clone();
+                if let Some(main_win) = app_c.get_webview_window("main") {
+                    let _ = main_win.eval("if (window.gc) window.gc();");
+                }
+                if let Some(overlay_win) = app_c.get_webview_window("overlay") {
+                    let _ = overlay_win.eval("if (window.gc) window.gc();");
+                }
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    trim_working_set();
+                    let ram = get_current_ram_mb();
+                    log::info!("Full recursive RAM working set trim triggered. Current: {} MB", ram);
+                });
             }
             "toggle_autostart" => {
                 let enabled = toggle_autostart();
