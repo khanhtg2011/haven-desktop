@@ -29,3 +29,7 @@ Thumbs.db
 .vscode/
 .idea/
 *.log
+
+# Arena & Rust build artifacts
+.arena/
+src-tauri/target/

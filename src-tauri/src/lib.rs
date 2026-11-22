@@ -18,6 +18,9 @@ const OVERLAY_BRIDGE_SCRIPT: &str = r#"
       onState: function(fn) {
         window.__TAURI__.event.listen('voice-overlay:state', function(e) { fn(e.payload); });
       },
+      onClearMessages: function(fn) {
+        window.__TAURI__.event.listen('voice-overlay:clear-messages', function(e) { fn(e.payload); });
+      },
       done: function() {
         if (window.__TAURI__.core) {
           window.__TAURI__.core.invoke('voice_overlay_done');
@@ -127,6 +130,8 @@ pub fn run() {
             voice_overlay_set_editing,
             voice_overlay_snap,
             toggle_voice_overlay_command,
+            toggle_voice_overlay_persistent,
+            clear_overlay_messages,
             voice_overlay_done
         ])
         .run(tauri::generate_context!())

@@ -142,26 +142,75 @@ body.right .user {
 .icons { display: flex; gap: 3px; flex: none; }
 .icons svg { width: 1em; height: 1em; fill: var(--muted); }
 
+#messages {
+  contain: layout style paint;
+}
+
 .msg {
   max-width: 100%;
-  padding: calc(5px * var(--scale)) calc(10px * var(--scale));
+  padding: calc(6px * var(--scale)) calc(12px * var(--scale));
   border-radius: 10px;
   border-left: 3px solid var(--accent);
-  background: var(--pill);
+  background: rgba(14, 16, 24, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
   font-weight: 500;
   font-size: 0.92em;
   overflow-wrap: anywhere;
-  transition: opacity 600ms ease;
+  will-change: transform, opacity;
+  transition: opacity 600ms ease, transform 300ms ease;
+  animation: msgSlideIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
-body.right .msg { border-left: 0; border-right: 3px solid var(--accent); text-align: right; }
-.msg .who { font-weight: 700; color: var(--c, #c9c2ff); }
+
+@keyframes msgSlideIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+body.right .msg {
+  border-left: 0;
+  border-right: 3px solid var(--accent);
+  text-align: right;
+  animation: msgSlideInRight 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes msgSlideInRight {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.msg-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+body.right .msg-meta {
+  justify-content: flex-end;
+}
+
+.channel-badge {
+  font-size: 0.72em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(124, 92, 252, 0.35);
+  color: #dcd6ff;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.msg .who { font-weight: 700; color: var(--c, #c9c2ff); text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); }
 .msg .body {
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  color: #f1f5f9;
+  line-height: 1.35;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
 }
-.msg.fading { opacity: 0; }
+.msg.fading { opacity: 0; transform: scale(0.96); }
 
 #hint {
   display: none;

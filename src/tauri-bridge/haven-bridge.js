@@ -336,14 +336,21 @@
     }
   }, true);
 
-  // 8. Voice Overlay Reporter Engine
-  // Automatically gathers voice activity, member speaking highlights, and channel chat
+  // 8. Voice & In-Game Chat Overlay Reporter Engine
+  // Automatically gathers voice activity, member speaking highlights, and real-time chat messages
   (function initVoiceOverlayReporter() {
     let lastSent = '';
     let socket = null;
     let rosters = Object.create(null);
     const messages = [];
     let seq = 0;
+
+    if (window.__TAURI__ && window.__TAURI__.event) {
+      window.__TAURI__.event.listen('voice-overlay:clear-messages', () => {
+        messages.length = 0;
+        tick();
+      });
+    }
 
     function listen(app) {
       if (!app.socket || app.socket === socket || typeof app.socket.on !== 'function') return;
@@ -359,40 +366,47 @@
 
       socket.on('new-message', (d) => {
         const m = d && d.message;
-        const v = app.voice;
-        if (!m || !v || !v.inVoice || d.channelCode !== v.currentChannel) return;
+        if (!m) return;
+        const channelObj = (app.channels || []).find(c => c && c.code === d.channelCode);
+        const chName = channelObj ? (channelObj.name || d.channelCode) : (d.channelCode || 'chat');
         messages.push({
           seq: ++seq,
-          channel: d.channelCode,
+          channelCode: d.channelCode || 'chat',
+          channelName: chName,
           userId: m.user_id,
-          username: m.username || 'User',
+          name: m.displayName || m.username || m.author_name || 'User',
+          color: m.roleColor || null,
           content: m.content || '',
+          time: Date.now(),
         });
-        if (messages.length > 10) messages.shift();
+        if (messages.length > 8) messages.shift();
         tick();
       });
     }
 
     function report() {
       const app = window.app;
-      if (!app || !app.voice || !app.user) return null;
+      if (!app || !app.user) return null;
       listen(app);
 
-      const v = app.voice;
+      const v = app.voice || {};
       const me = app.user;
       const code = v.inVoice ? v.currentChannel : null;
-      if (!code) return { inVoice: false };
 
-      let roster = (rosters[code] || []).slice();
-      if (!roster.some(u => u && u.id === me.id)) {
-        roster.unshift({ id: me.id, username: me.displayName || me.username, roleColor: me.roleColor });
+      let roster = [];
+      if (code) {
+        roster = (rosters[code] || []).slice();
+        if (!roster.some(u => u && u.id === me.id)) {
+          roster.unshift({ id: me.id, username: me.displayName || me.username, roleColor: me.roleColor });
+        }
       }
 
-      const talking = v.talkingState instanceof Map ? v.talkingState : new Map();
+      const talking = (v.talkingState instanceof Map) ? v.talkingState : new Map();
       const channel = (app.channels || []).find(c => c && c.code === code);
 
       return {
-        inVoice: true,
+        key: code || 'persistent-hud',
+        inVoice: !!code,
         channelName: String((channel && channel.name) || ''),
         users: roster.filter(Boolean).map(u => {
           const self = u.id === me.id;
@@ -408,9 +422,11 @@
             deafened: self ? !!v.isDeafened : !!u.isDeafened,
           };
         }),
-        messages: messages.filter(m => m.channel === code).map(m => ({
+        messages: messages.map(m => ({
           seq: m.seq,
-          name: m.username,
+          channelName: m.channelName,
+          name: m.name,
+          color: m.color,
           content: m.content || '',
         })),
       };

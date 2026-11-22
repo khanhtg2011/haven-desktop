@@ -26,6 +26,7 @@ impl Default for ShortcutsConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct VoiceOverlaySettings {
     pub enabled: bool,
+    pub persistent_chat: bool,
     pub only_speaking: bool,
     pub show_messages: bool,
     pub scale: f64,
@@ -38,6 +39,7 @@ impl Default for VoiceOverlaySettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            persistent_chat: true,
             only_speaking: false,
             show_messages: true,
             scale: 1.0,
@@ -136,13 +138,23 @@ pub fn set_voice_overlay_enabled(app: AppHandle, state: State<AppState>, enabled
             let _ = w.hide();
         }
     } else {
+        let settings = state.overlay_settings.lock().unwrap().clone();
+        if let Some(w) = app.get_webview_window("overlay") {
+            if settings.persistent_chat {
+                let _ = w.show();
+                let _ = w.set_ignore_cursor_events(true);
+            }
+        }
         let last = state.overlay_last_report.lock().unwrap().clone();
         if let Some(r) = last {
-            if r.get("inVoice").and_then(|v| v.as_bool()).unwrap_or(false) {
-                if let Some(w) = app.get_webview_window("overlay") {
+            if let Some(w) = app.get_webview_window("overlay") {
+                let in_voice = r.get("inVoice").and_then(|v| v.as_bool()).unwrap_or(false);
+                let has_messages = r.get("messages").and_then(|m| m.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+                if settings.persistent_chat || in_voice || has_messages {
                     let _ = w.show();
-                    let _ = app.emit_to("overlay", "voice-overlay:state", &r);
+                    let _ = w.set_ignore_cursor_events(true);
                 }
+                let _ = app.emit_to("overlay", "voice-overlay:state", &r);
             }
         }
     }
@@ -157,21 +169,59 @@ pub fn toggle_voice_overlay_command(app: AppHandle, state: State<AppState>) -> R
 }
 
 #[tauri::command]
+pub fn toggle_voice_overlay_persistent(app: AppHandle, state: State<AppState>) -> Result<bool, String> {
+    let mut settings = state.overlay_settings.lock().unwrap();
+    settings.persistent_chat = !settings.persistent_chat;
+    let new_val = settings.persistent_chat;
+    let enabled = settings.enabled;
+    drop(settings);
+    send_overlay_view(&app, &state);
+
+    if let Some(overlay_win) = app.get_webview_window("overlay") {
+        let in_voice = state.overlay_last_report.lock().unwrap().as_ref()
+            .and_then(|r| r.get("inVoice"))
+            .and_then(|v| v.as_bool()).unwrap_or(false);
+        if enabled && (new_val || in_voice) {
+            let _ = overlay_win.show();
+            let _ = overlay_win.set_ignore_cursor_events(true);
+        } else if !new_val && !in_voice {
+            let editing = state.overlay_settings.lock().unwrap().editing;
+            if !editing && overlay_win.is_visible().unwrap_or(false) {
+                let _ = overlay_win.hide();
+            }
+        }
+    }
+    Ok(new_val)
+}
+
+#[tauri::command]
+pub fn clear_overlay_messages(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    if let Some(ref mut rep) = *state.overlay_last_report.lock().unwrap() {
+        if let Some(obj) = rep.as_object_mut() {
+            obj.insert("messages".to_string(), serde_json::json!([]));
+        }
+    }
+    let _ = app.emit("voice-overlay:clear-messages", &serde_json::json!({}));
+    Ok(())
+}
+
+#[tauri::command]
 pub fn report_voice_overlay(app: AppHandle, state: State<AppState>, report: serde_json::Value) -> Result<(), String> {
-    let enabled = state.overlay_settings.lock().unwrap().enabled;
+    let settings = state.overlay_settings.lock().unwrap().clone();
     *state.overlay_last_report.lock().unwrap() = Some(report.clone());
 
     if let Some(overlay_win) = app.get_webview_window("overlay") {
         let in_voice = report.get("inVoice").and_then(|v| v.as_bool()).unwrap_or(false);
-        if enabled && in_voice {
+        let has_messages = report.get("messages").and_then(|m| m.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+
+        if settings.enabled && (settings.persistent_chat || in_voice || has_messages) {
             if !overlay_win.is_visible().unwrap_or(false) {
                 let _ = overlay_win.show();
                 let _ = overlay_win.set_ignore_cursor_events(true);
             }
             let _ = app.emit_to("overlay", "voice-overlay:state", &report);
-        } else if !in_voice {
-            let editing = state.overlay_settings.lock().unwrap().editing;
-            if !editing && overlay_win.is_visible().unwrap_or(false) {
+        } else if !settings.persistent_chat && !in_voice && !settings.editing {
+            if overlay_win.is_visible().unwrap_or(false) {
                 let _ = overlay_win.hide();
             }
         }
@@ -224,18 +274,24 @@ pub fn voice_overlay_snap(app: AppHandle, state: State<AppState>, corner: String
 pub fn send_overlay_view(app: &AppHandle, state: &State<AppState>) {
     let settings = state.overlay_settings.lock().unwrap().clone();
     let align = if settings.corner.contains("right") { "right" } else { "left" };
+    let idle_text = if settings.persistent_chat {
+        "Haven In-Game HUD: Đang chờ tin nhắn..."
+    } else {
+        "Tham gia phòng thoại để thấy thành viên tại đây."
+    };
     let view_payload = serde_json::json!({
+        "persistentChat": settings.persistent_chat,
         "onlySpeaking": settings.only_speaking,
         "showMessages": settings.show_messages,
         "scale": settings.scale,
         "opacity": settings.opacity,
-        "messageSeconds": 12,
+        "messageSeconds": if settings.persistent_chat { 60 } else { 12 },
         "editing": settings.editing,
         "align": align,
         "labels": {
-            "move": "Kéo để di chuyển vị trí overlay",
+            "move": "Kéo để di chuyển vị trí HUD",
             "done": "Xong",
-            "idle": "Tham gia phòng thoại để thấy thành viên tại đây."
+            "idle": idle_text
         }
     });
     let _ = app.emit_to("overlay", "voice-overlay:view", &view_payload);
