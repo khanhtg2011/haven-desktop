@@ -1,12 +1,12 @@
 // ══════════════════════════════════════════════════════════════════════════════
 // Haven Desktop: Tauri v2 Preload Bridge (Ultra-Optimized)
-// 100% Desktop Parity & Navigation Controls for Haven Web Client
+// 100% Desktop Parity, Triple-Layer Auto-Permissions & In-Game Voice Overlay HUD
 // ══════════════════════════════════════════════════════════════════════════════
 
 (function () {
   'use strict';
 
-  // 1. Immediately stamp desktop identification attributes on <html>
+  // 1. Stamp desktop identification attributes on <html> and <body>
   try {
     if (document.documentElement) {
       document.documentElement.setAttribute('data-desktop-app', 'true');
@@ -14,8 +14,48 @@
     }
   } catch (_) {}
 
-  // 2. Inject global CSS to permanently suppress web promo popups
+  // 2. Triple-Layer Auto-Grant Device Permissions (Microphone, Camera, Notifications)
+  // Completely eliminates any browser permission prompts
   try {
+    if (navigator.permissions && navigator.permissions.query) {
+      const originalQuery = navigator.permissions.query.bind(navigator.permissions);
+      navigator.permissions.query = function (param) {
+        if (param && ['microphone', 'camera', 'notifications', 'speaker-selection', 'clipboard-read', 'clipboard-write'].includes(param.name)) {
+          return Promise.resolve({
+            state: 'granted',
+            name: param.name,
+            onchange: null,
+            addEventListener: () => {},
+            removeEventListener: () => {},
+            dispatchEvent: () => false,
+          });
+        }
+        return originalQuery(param);
+      };
+    }
+
+    if (typeof window.Notification !== 'undefined') {
+      window.Notification.requestPermission = () => Promise.resolve('granted');
+      try {
+        Object.defineProperty(window.Notification, 'permission', {
+          get: () => 'granted',
+          configurable: true,
+        });
+      } catch (_) {}
+    }
+  } catch (err) {
+    console.warn('[Haven Desktop] Permission auto-grant shim warning:', err);
+  }
+
+  // 3. Permanently suppress web promo popups & seed welcome flags
+  try {
+    localStorage.setItem('promo_seen_desktop', '1');
+    const welcomeKey = 'haven_welcome_seen_v1';
+    let seen = {};
+    try { seen = JSON.parse(localStorage.getItem(welcomeKey) || '{}'); } catch (_) {}
+    seen.desktop_app_promo = true;
+    localStorage.setItem(welcomeKey, JSON.stringify(seen));
+
     const style = document.createElement('style');
     style.id = 'haven-desktop-injected-style';
     style.textContent = `
@@ -40,7 +80,7 @@
     }
   } catch (_) {}
 
-  // 3. Desktop Keyboard Navigation & Shortcuts
+  // 4. Desktop Keyboard Navigation & Shortcuts
   window.addEventListener('keydown', (e) => {
     // F5 or Ctrl+R: Refresh page
     if (e.key === 'F5' || (e.ctrlKey && (e.key === 'r' || e.key === 'R'))) {
@@ -48,19 +88,19 @@
       window.location.reload();
       return;
     }
-    // Alt + LeftArrow: Go Back
+    // Alt+Left: History back
     if (e.altKey && e.key === 'ArrowLeft') {
       e.preventDefault();
       window.history.back();
       return;
     }
-    // Alt + RightArrow: Go Forward
+    // Alt+Right: History forward
     if (e.altKey && e.key === 'ArrowRight') {
       e.preventDefault();
       window.history.forward();
       return;
     }
-    // F11: Toggle Fullscreen
+    // F11: Fullscreen toggle
     if (e.key === 'F11') {
       e.preventDefault();
       if (!document.fullscreenElement) {
@@ -68,10 +108,18 @@
       } else {
         document.exitFullscreen().catch(() => {});
       }
+      return;
+    }
+    // Ctrl+Shift+O: Toggle Voice Overlay
+    if (e.ctrlKey && e.shiftKey && (e.key === 'o' || e.key === 'O')) {
+      e.preventDefault();
+      if (window.__TAURI__ && window.__TAURI__.core) {
+        window.__TAURI__.core.invoke('toggle_voice_overlay_command');
+      }
     }
   }, true);
 
-  // 4. Tauri IPC invoke helper
+  // 5. Tauri IPC invoke helper
   const invoke = (cmd, args = {}) => {
     if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
       return window.__TAURI__.core.invoke(cmd, args);
@@ -79,32 +127,64 @@
     return Promise.resolve(null);
   };
 
-  // 5. Build window.havenDesktop API
+  // 6. Build window.havenDesktop API
   const havenDesktop = {
     platform: 'win32',
     isDesktopApp: true,
-    pageFocusFollowsWindow: true,
-    initialServerList: ['https://haven.khanhs.io.vn'],
-    serverListGated: false,
-
-    getVersion: async () => {
-      try { return await invoke('get_app_version'); }
-      catch { return '2.0.0-alpha.1'; }
-    },
 
     window: {
       minimize: () => invoke('window_minimize'),
       maximize: () => invoke('window_maximize'),
-      close:    () => invoke('window_close'),
+      close: () => invoke('window_close'),
+      isMaximized: async () => false,
     },
 
-    notify: (title, body, opts = {}) => {
+    app: {
+      getVersion: async () => {
+        try { return await invoke('get_app_version'); }
+        catch { return '2.0.0-tauri'; }
+      },
+      isUpdateAvailable: async () => false,
+      installUpdate: () => {},
+      openExternal: (url) => {
+        window.open(url, '_blank');
+      },
+    },
+
+    // Voice Overlay Bridge methods
+    voiceOverlayEnabled: async () => {
+      try {
+        const res = await invoke('is_voice_overlay_enabled');
+        return res !== false;
+      } catch {
+        return true;
+      }
+    },
+
+    voiceOverlayReport: (report) => {
+      invoke('report_voice_overlay', { report });
+    },
+
+    notify: ({ title, body, icon, channelCode, unreadCount } = {}) => {
       try {
         if ('Notification' in window && Notification.permission === 'granted') {
-          new Notification(title, { body, ...opts });
+          const n = new Notification(title || 'Haven', {
+            body: body || '',
+            icon: icon || undefined,
+            tag: channelCode || undefined,
+          });
+          n.onclick = () => {
+            window.focus();
+            if (channelCode && window.app && window.app.selectChannel) {
+              window.app.selectChannel(channelCode);
+            }
+          };
         }
-      } catch (_) {}
+      } catch (err) {
+        console.warn('[Haven Desktop] Notification error:', err);
+      }
     },
+
     dismissNotification: (_channelCode) => {},
 
     audio: {
@@ -151,9 +231,7 @@
       invoke('update_voice_state', { voiceState: state });
     },
 
-    clipboardWriteImage: async (_payload) => {
-      return { ok: true };
-    },
+    clipboardWriteImage: async (_payload) => ({ ok: true }),
 
     clipboardWriteText: async (text) => {
       try {
@@ -186,26 +264,119 @@
     backToWelcome: () => invoke('switch_server', { url: 'https://haven.khanhs.io.vn' }),
 
     update: {
-      download: async () => true,
+      check: async () => ({ updateAvailable: false }),
+      download: () => {},
       install: () => {},
-    },
-
-    i18n: {
-      getState: () => ({ locale: 'vi' }),
-      getLocale: () => 'vi',
-      t: (key) => key,
-      setLanguage: async () => true,
+      onStatus: () => () => {},
     },
   };
 
-  // Mount globals
+  // Expose API globally
   window.havenDesktop = havenDesktop;
-  window.__havenDesktopPage = {
-    subscribe: () => true,
-    t: (key) => key,
-    dialog: () => null,
+  window.electronAPI = havenDesktop;
+  window.havenAPI = {
+    platform: 'win32',
+    isDesktop: true,
+    isDesktopApp: true,
     notify: havenDesktop.notify,
   };
 
-  console.log('[Haven Desktop] Native Rust & Tauri Bridge active!');
+  // 7. Voice Overlay Reporter Engine
+  // Automatically gathers voice activity, member speaking highlights, and channel chat
+  (function initVoiceOverlayReporter() {
+    let lastSent = '';
+    let socket = null;
+    let rosters = Object.create(null);
+    let asked = Object.create(null);
+    const messages = [];
+    let seq = 0;
+
+    function listen(app) {
+      if (!app.socket || app.socket === socket || typeof app.socket.on !== 'function') return;
+      socket = app.socket;
+      rosters = Object.create(null);
+      asked = Object.create(null);
+
+      socket.on('voice-users-update', (d) => {
+        if (d && typeof d.channelCode === 'string' && Array.isArray(d.users)) {
+          rosters[d.channelCode] = d.users;
+        }
+        tick();
+      });
+
+      socket.on('new-message', (d) => {
+        const m = d && d.message;
+        const v = app.voice;
+        if (!m || !v || !v.inVoice || d.channelCode !== v.currentChannel) return;
+        messages.push({
+          seq: ++seq,
+          channel: d.channelCode,
+          userId: m.user_id,
+          username: m.username || 'User',
+          content: m.content || '',
+        });
+        if (messages.length > 10) messages.shift();
+        tick();
+      });
+    }
+
+    function report() {
+      const app = window.app;
+      if (!app || !app.voice || !app.user) return null;
+      listen(app);
+
+      const v = app.voice;
+      const me = app.user;
+      const code = v.inVoice ? v.currentChannel : null;
+      if (!code) return { inVoice: false };
+
+      let roster = (rosters[code] || []).slice();
+      if (!roster.some(u => u && u.id === me.id)) {
+        roster.unshift({ id: me.id, username: me.displayName || me.username, roleColor: me.roleColor });
+      }
+
+      const talking = v.talkingState instanceof Map ? v.talkingState : new Map();
+      const channel = (app.channels || []).find(c => c && c.code === code);
+
+      return {
+        inVoice: true,
+        channelName: String((channel && channel.name) || ''),
+        users: roster.filter(Boolean).map(u => {
+          const self = u.id === me.id;
+          return {
+            id: u.id,
+            name: u.displayName || u.username || 'User',
+            color: u.roleColor || null,
+            avatar: u.avatar || (self ? me.avatar : null),
+            isSelf: self,
+            isBot: !!u.isBot,
+            talking: !!(self ? talking.get('self') : talking.get(u.id)),
+            muted: self ? !!v.isMuted : !!u.isMuted,
+            deafened: self ? !!v.isDeafened : !!u.isDeafened,
+          };
+        }),
+        messages: messages.filter(m => m.channel === code).map(m => ({
+          seq: m.seq,
+          name: m.username,
+          content: m.content || '',
+        })),
+      };
+    }
+
+    function tick() {
+      try {
+        const r = report();
+        if (!r) return;
+        const sig = JSON.stringify(r);
+        if (sig === lastSent) return;
+        lastSent = sig;
+        invoke('report_voice_overlay', { report: r });
+      } catch (_) {}
+    }
+
+    // High-resolution check for responsive speaking highlight animation
+    setInterval(tick, 120);
+  })();
+
+  console.log('[Haven Desktop] Native Rust & Tauri Bridge active with auto-permissions & Voice Overlay!');
 })();

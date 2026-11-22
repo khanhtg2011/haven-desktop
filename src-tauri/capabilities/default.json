@@ -3,10 +3,16 @@
   "identifier": "default",
   "description": "Enables default permissions for Haven Desktop",
   "windows": [
-    "main",
-    "overlay"
+    "*"
   ],
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:event:default",
+    "core:window:allow-set-ignore-cursor-events",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-set-focus"
   ]
 }
