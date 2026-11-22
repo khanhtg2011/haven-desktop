@@ -85,6 +85,12 @@ struct MSG {
 }
 
 #[cfg(target_os = "windows")]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetModuleHandleW(lp_module_name: *const u16) -> isize;
+}
+
+#[cfg(target_os = "windows")]
 #[link(name = "gdiplus")]
 extern "system" {
     fn GdiplusStartup(token: *mut usize, input: *const GdiplusStartupInput, output: *mut c_void) -> i32;
@@ -658,6 +664,7 @@ pub fn init() {
             return;
         }
 
+        let h_instance = GetModuleHandleW(std::ptr::null());
         let class_name = to_wide("HavenNativeOverlayWindow");
         let wnd_class = WNDCLASSEXW {
             cb_size: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -665,7 +672,7 @@ pub fn init() {
             lpfn_wnd_proc: Some(overlay_wndproc),
             cb_cls_extra: 0,
             cb_wnd_extra: 0,
-            h_instance: 0,
+            h_instance,
             h_icon: 0,
             h_cursor: 0,
             hbr_background: 0,
@@ -691,7 +698,7 @@ pub fn init() {
             OVERLAY_HEIGHT,
             0,
             0,
-            0,
+            h_instance,
             std::ptr::null_mut(),
         );
 

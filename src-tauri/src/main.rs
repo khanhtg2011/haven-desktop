@@ -33,26 +33,11 @@ fn main() {
             return;
         }
 
-        // 2. Radical WebView2 Memory & Performance Optimization Flags
-        // Auto-grants media permissions, caps V8 heap, enforces single renderer, enables Chromium MemoryReducer
-        let args = [
-            "--use-fake-ui-for-media-stream",
-            "--autoplay-policy=no-user-gesture-required",
-            "--enable-low-end-device-mode",
-            "--renderer-process-limit=1",
-            "--disable-renderer-backgrounding=false",
-            "--disk-cache-size=16777216",
-            "--media-cache-size=16777216",
-            "--disable-gpu-shader-disk-cache",
-            "--disable-speech-api",
-            "--disable-background-networking",
-            "--disable-sync",
-            "--disable-extensions",
-            "--js-flags=--expose-gc,--max-old-space-size=96",
-            "--enable-features=MemoryReducer,PurgeAndSuspend,IntensiveWakeUpThrottling,ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes",
-            "--disable-features=MediaEngagementBypassAutoplayPolicies,PreloadMediaEngagementData,Translate,AutofillServerCommunication,OptimizationHints",
-        ].join(" ");
-        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", args);
+        // 2. Safe WebView2 Optimization Flags (Auto-grants media permissions & low-end-device mode)
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required --enable-low-end-device-mode --disk-cache-size=16777216",
+        );
     }
 
     haven_desktop_lib::run();
