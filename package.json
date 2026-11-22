@@ -14,6 +14,9 @@
     "npm": ">=10"
   },
   "scripts": {
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
     "start": "electron .",
     "dev": "electron . --dev",
     "test": "node --test test/*.test.js",
@@ -36,6 +39,7 @@
     "uiohook-napi": "^1.5.4"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.12.6",
     "electron": "^42.11.17",
     "electron-builder": "^26.15.7",
     "node-gyp": "^12.4.0",
