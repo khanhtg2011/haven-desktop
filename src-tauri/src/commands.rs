@@ -143,6 +143,39 @@ pub fn update_voice_state(state: State<AppState>, voice_state: serde_json::Value
 
 // ── Voice Overlay Commands ──────────────────────────────────────────────────
 
+pub fn get_or_create_overlay(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+    if let Some(w) = app.get_webview_window("overlay") {
+        return Some(w);
+    }
+    let overlay_builder = tauri::webview::WebviewWindowBuilder::new(
+        app,
+        "overlay",
+        tauri::WebviewUrl::App("voice-overlay.html".into()),
+    )
+    .title("Haven Voice Overlay")
+    .inner_size(360.0, 640.0)
+    .position(20.0, 20.0)
+    .resizable(false)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .visible(false)
+    .initialization_script(crate::OVERLAY_BRIDGE_SCRIPT);
+
+    match overlay_builder.build() {
+        Ok(win) => {
+            let _ = win.set_ignore_cursor_events(true);
+            Some(win)
+        }
+        Err(e) => {
+            log::warn!("Could not create overlay window: {}", e);
+            None
+        }
+    }
+}
+
 #[tauri::command]
 pub fn is_voice_overlay_enabled(state: State<AppState>) -> bool {
     state.overlay_settings.lock().unwrap().enabled
@@ -156,7 +189,7 @@ pub fn set_voice_overlay_enabled(app: AppHandle, state: State<AppState>, enabled
             let _ = w.hide();
         }
     } else {
-        if let Some(w) = app.get_webview_window("overlay") {
+        if let Some(w) = get_or_create_overlay(&app) {
             let _ = w.show();
             let _ = w.set_ignore_cursor_events(true);
         }
@@ -185,14 +218,17 @@ pub fn toggle_voice_overlay_persistent(app: AppHandle, state: State<AppState>) -
     drop(settings);
     send_overlay_view(&app, &state);
 
-    if let Some(overlay_win) = app.get_webview_window("overlay") {
-        let in_voice = state.overlay_last_report.lock().unwrap().as_ref()
-            .and_then(|r| r.get("inVoice"))
-            .and_then(|v| v.as_bool()).unwrap_or(false);
-        if enabled && (new_val || in_voice) {
+    let in_voice = state.overlay_last_report.lock().unwrap().as_ref()
+        .and_then(|r| r.get("inVoice"))
+        .and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if enabled && (new_val || in_voice) {
+        if let Some(overlay_win) = get_or_create_overlay(&app) {
             let _ = overlay_win.show();
             let _ = overlay_win.set_ignore_cursor_events(true);
-        } else if !new_val && !in_voice {
+        }
+    } else if !new_val && !in_voice {
+        if let Some(overlay_win) = app.get_webview_window("overlay") {
             let editing = state.overlay_settings.lock().unwrap().editing;
             if !editing && overlay_win.is_visible().unwrap_or(false) {
                 let _ = overlay_win.hide();
@@ -218,18 +254,20 @@ pub fn report_voice_overlay(app: AppHandle, state: State<AppState>, report: serd
     let settings = state.overlay_settings.lock().unwrap().clone();
     *state.overlay_last_report.lock().unwrap() = Some(report.clone());
 
-    if let Some(overlay_win) = app.get_webview_window("overlay") {
-        let in_voice = report.get("inVoice").and_then(|v| v.as_bool()).unwrap_or(false);
-        let has_messages = report.get("messages").and_then(|m| m.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+    let in_voice = report.get("inVoice").and_then(|v| v.as_bool()).unwrap_or(false);
+    let has_messages = report.get("messages").and_then(|m| m.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
 
-        if settings.enabled && (settings.persistent_chat || in_voice || has_messages) {
+    if settings.enabled && (settings.persistent_chat || in_voice || has_messages) {
+        if let Some(overlay_win) = get_or_create_overlay(&app) {
             if !overlay_win.is_visible().unwrap_or(false) {
                 let _ = overlay_win.show();
                 let _ = overlay_win.set_ignore_cursor_events(true);
             }
             let _ = app.emit_to("overlay", "voice-overlay:state", &report);
             let _ = app.emit("voice-overlay:state", &report);
-        } else if !settings.persistent_chat && !in_voice && !settings.editing {
+        }
+    } else if !settings.persistent_chat && !in_voice && !settings.editing {
+        if let Some(overlay_win) = app.get_webview_window("overlay") {
             if overlay_win.is_visible().unwrap_or(false) {
                 let _ = overlay_win.hide();
             }
@@ -251,7 +289,7 @@ pub fn voice_overlay_done(app: AppHandle, state: State<AppState>) -> Result<(), 
 #[tauri::command]
 pub fn voice_overlay_set_editing(app: AppHandle, state: State<AppState>, editing: bool) -> Result<(), String> {
     state.overlay_settings.lock().unwrap().editing = editing;
-    if let Some(w) = app.get_webview_window("overlay") {
+    if let Some(w) = get_or_create_overlay(&app) {
         if editing {
             let _ = w.show();
             let _ = w.set_ignore_cursor_events(false);
@@ -267,7 +305,7 @@ pub fn voice_overlay_set_editing(app: AppHandle, state: State<AppState>, editing
 #[tauri::command]
 pub fn voice_overlay_snap(app: AppHandle, state: State<AppState>, corner: String) -> Result<(), String> {
     state.overlay_settings.lock().unwrap().corner = corner.clone();
-    if let Some(w) = app.get_webview_window("overlay") {
+    if let Some(w) = get_or_create_overlay(&app) {
         let pos = match corner.as_str() {
             "top-right" => (1920 - 380, 20),
             "bottom-left" => (20, 1080 - 660),

@@ -7,8 +7,8 @@ use tauri::{
     AppHandle, Manager, WebviewUrl,
 };
 
-const BRIDGE_SCRIPT: &str = include_str!("../../src/tauri-bridge/haven-bridge.js");
-const OVERLAY_BRIDGE_SCRIPT: &str = r#"
+pub const BRIDGE_SCRIPT: &str = include_str!("../../src/tauri-bridge/haven-bridge.js");
+pub const OVERLAY_BRIDGE_SCRIPT: &str = r#"
 (function() {
   if (window.__TAURI__ && window.__TAURI__.event) {
     window.voiceOverlay = {

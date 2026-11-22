@@ -33,11 +33,8 @@ fn main() {
             return;
         }
 
-        // 2. Safe WebView2 Optimization Flags (Auto-grants media permissions & low-end-device mode)
-        std::env::set_var(
-            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required --enable-low-end-device-mode --disk-cache-size=16777216",
-        );
+        // 2. Allow clean WebView2 execution without conflicting flags
+        // Device permissions and autoplay are handled directly via Tauri runtime hooks
     }
 
     haven_desktop_lib::run();
