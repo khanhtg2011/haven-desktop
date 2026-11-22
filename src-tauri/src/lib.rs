@@ -1,14 +1,35 @@
 pub mod commands;
 pub mod tray;
-pub mod native_overlay;
 
 use commands::*;
 use tauri::{
     webview::{PermissionResponse, WebviewWindowBuilder},
-    AppHandle, Manager,
+    AppHandle, Manager, WebviewUrl,
 };
 
 const BRIDGE_SCRIPT: &str = include_str!("../../src/tauri-bridge/haven-bridge.js");
+const OVERLAY_BRIDGE_SCRIPT: &str = r#"
+(function() {
+  if (window.__TAURI__ && window.__TAURI__.event) {
+    window.voiceOverlay = {
+      onView: function(fn) {
+        window.__TAURI__.event.listen('voice-overlay:view', function(e) { fn(e.payload); });
+      },
+      onState: function(fn) {
+        window.__TAURI__.event.listen('voice-overlay:state', function(e) { fn(e.payload); });
+      },
+      onClearMessages: function(fn) {
+        window.__TAURI__.event.listen('voice-overlay:clear-messages', function(e) { fn(e.payload); });
+      },
+      done: function() {
+        if (window.__TAURI__.core) {
+          window.__TAURI__.core.invoke('voice_overlay_done');
+        }
+      }
+    };
+  }
+})();
+"#;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -51,17 +72,42 @@ pub fn run() {
                 });
             }
 
-            // 2. Initialize Pure Native Win32 / GDI+ In-Game HUD (Zero WebView2, ~3MB RAM)
-            native_overlay::init();
+            // 2. Construct In-Game Voice & Chat Overlay Window using Haven's original UI source
+            let overlay_builder = WebviewWindowBuilder::new(
+                app_handle,
+                "overlay",
+                WebviewUrl::App("voice-overlay.html".into()),
+            )
+            .title("Haven Voice Overlay")
+            .inner_size(360.0, 640.0)
+            .position(20.0, 20.0)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(true)
+            .initialization_script(OVERLAY_BRIDGE_SCRIPT);
+
+            if let Ok(overlay_win) = overlay_builder.build() {
+                let _ = overlay_win.set_ignore_cursor_events(true);
+            }
+
+            // Send initial overlay view settings
+            let app_state: tauri::State<AppState> = app_handle.state();
+            commands::send_overlay_view(app_handle, &app_state);
 
             // 3. Periodic Background RAM Working Set Trimmer
-            // Triggers V8 JS Garbage Collection and flushes working set across WebView2 processes every 30s
             let bg_app = app_handle.clone();
             std::thread::spawn(move || {
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(30));
                     if let Some(main_win) = bg_app.get_webview_window("main") {
                         let _ = main_win.eval("if (window.gc) window.gc();");
+                    }
+                    if let Some(overlay_win) = bg_app.get_webview_window("overlay") {
+                        let _ = overlay_win.eval("if (window.gc) window.gc();");
                     }
                     std::thread::sleep(std::time::Duration::from_millis(150));
                     tray::trim_working_set();

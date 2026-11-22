@@ -197,21 +197,22 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     };
     let autostart_i = MenuItem::with_id(app, "toggle_autostart", autostart_text, true, None::<&str>)?;
 
-    let overlay_toggle_i = MenuItem::with_id(app, "toggle_overlay", "Bật/Tắt Native HUD", true, None::<&str>)?;
+    let overlay_toggle_i = MenuItem::with_id(app, "toggle_overlay", "Bật/Tắt Voice Overlay (HUD)", true, None::<&str>)?;
     let app_state: State<AppState> = app.state();
     let persistent_text = if app_state.overlay_settings.lock().unwrap().persistent_chat {
-        "Luôn hiện Native HUD (Đọc Chat): [BẬT]"
+        "Luôn hiện Overlay (Đọc Chat): [BẬT]"
     } else {
-        "Luôn hiện Native HUD (Đọc Chat): [TẮT]"
+        "Luôn hiện Overlay (Đọc Chat): [TẮT]"
     };
     let persistent_i = MenuItem::with_id(app, "toggle_persistent", persistent_text, true, None::<&str>)?;
-    let clear_msgs_i = MenuItem::with_id(app, "clear_msgs", "Xóa tin nhắn trên HUD", true, None::<&str>)?;
+    let clear_msgs_i = MenuItem::with_id(app, "clear_msgs", "Xóa tin nhắn trên Overlay", true, None::<&str>)?;
+    let overlay_move_i = MenuItem::with_id(app, "move_overlay", "Di chuyển vị trí Overlay", true, None::<&str>)?;
     let snap_tl_i = MenuItem::with_id(app, "snap_tl", "Góc trên - Bên trái", true, None::<&str>)?;
     let snap_tr_i = MenuItem::with_id(app, "snap_tr", "Góc trên - Bên phải", true, None::<&str>)?;
     let snap_bl_i = MenuItem::with_id(app, "snap_bl", "Góc dưới - Bên trái", true, None::<&str>)?;
     let snap_br_i = MenuItem::with_id(app, "snap_br", "Góc dưới - Bên phải", true, None::<&str>)?;
-    let snap_sub = Submenu::with_items(app, "Ghim vị trí góc màn hình", true, &[&snap_tl_i, &snap_tr_i, &snap_bl_i, &snap_br_i])?;
-    let overlay_sub = Submenu::with_items(app, "Native In-Game HUD (Pure Rust - 0% WebView)", true, &[&overlay_toggle_i, &persistent_i, &clear_msgs_i, &snap_sub])?;
+    let snap_sub = Submenu::with_items(app, "Ghim vào góc màn hình", true, &[&snap_tl_i, &snap_tr_i, &snap_bl_i, &snap_br_i])?;
+    let overlay_sub = Submenu::with_items(app, "Voice Overlay (In-Game HUD)", true, &[&overlay_toggle_i, &persistent_i, &clear_msgs_i, &overlay_move_i, &snap_sub])?;
 
     let sep1 = PredefinedMenuItem::separator(app)?;
     let mute_i = MenuItem::with_id(app, "toggle_mute", "Bật/Tắt Mic", true, None::<&str>)?;
