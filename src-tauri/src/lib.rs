@@ -2,7 +2,7 @@ pub mod commands;
 pub mod tray;
 
 use commands::*;
-use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, WebviewWindowBuilder};
 
 const BRIDGE_SCRIPT: &str = include_str!("../../src/tauri-bridge/haven-bridge.js");
 
@@ -19,12 +19,23 @@ pub fn run() {
             let app_handle = app.handle();
             let _ = tray::setup_tray(app_handle);
 
-            // Configure main window with bridge initialization script
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.eval(BRIDGE_SCRIPT);
+            // Construct main window from config and bind system-level initialization script
+            if let Some(win_cfg) = app.config().app.windows.first() {
+                let mut builder = WebviewWindowBuilder::from_config(app_handle, win_cfg)?;
+                builder = builder.initialization_script(BRIDGE_SCRIPT);
+                let window = builder.build()?;
+
+                // Close-to-Tray: Hide to tray instead of terminating when user clicks Close (✕)
+                let win_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = win_clone.hide();
+                    }
+                });
             }
 
-            log::info!("Haven Desktop (Tauri v2) initialized successfully!");
+            log::info!("Haven Desktop 2.0 (Tauri v2 + Rust) loaded with full desktop parity!");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

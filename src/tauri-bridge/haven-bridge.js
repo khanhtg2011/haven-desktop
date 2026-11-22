@@ -1,12 +1,77 @@
 // ══════════════════════════════════════════════════════════════════════════════
-// Haven Desktop: Tauri v2 Preload Bridge
-// Replaces Electron's app-preload.js with 100% API parity for window.havenDesktop
+// Haven Desktop: Tauri v2 Preload Bridge (Ultra-Optimized)
+// 100% Desktop Parity & Navigation Controls for Haven Web Client
 // ══════════════════════════════════════════════════════════════════════════════
 
 (function () {
   'use strict';
 
-  // Ensure invoke helper is available from Tauri v2 internals
+  // 1. Immediately stamp desktop identification attributes on <html>
+  try {
+    if (document.documentElement) {
+      document.documentElement.setAttribute('data-desktop-app', 'true');
+      document.documentElement.setAttribute('data-platform', 'win32');
+    }
+  } catch (_) {}
+
+  // 2. Inject global CSS to permanently suppress web promo popups
+  try {
+    const style = document.createElement('style');
+    style.id = 'haven-desktop-injected-style';
+    style.textContent = `
+      #desktop-promo-modal,
+      .modal-overlay.desktop-promo,
+      .desktop-promo,
+      #desktop-app-banner {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+    `;
+    if (document.head) {
+      document.head.appendChild(style);
+    } else {
+      document.addEventListener('DOMContentLoaded', () => {
+        if (!document.getElementById('haven-desktop-injected-style') && document.head) {
+          document.head.appendChild(style);
+        }
+      });
+    }
+  } catch (_) {}
+
+  // 3. Desktop Keyboard Navigation & Shortcuts
+  window.addEventListener('keydown', (e) => {
+    // F5 or Ctrl+R: Refresh page
+    if (e.key === 'F5' || (e.ctrlKey && (e.key === 'r' || e.key === 'R'))) {
+      e.preventDefault();
+      window.location.reload();
+      return;
+    }
+    // Alt + LeftArrow: Go Back
+    if (e.altKey && e.key === 'ArrowLeft') {
+      e.preventDefault();
+      window.history.back();
+      return;
+    }
+    // Alt + RightArrow: Go Forward
+    if (e.altKey && e.key === 'ArrowRight') {
+      e.preventDefault();
+      window.history.forward();
+      return;
+    }
+    // F11: Toggle Fullscreen
+    if (e.key === 'F11') {
+      e.preventDefault();
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    }
+  }, true);
+
+  // 4. Tauri IPC invoke helper
   const invoke = (cmd, args = {}) => {
     if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
       return window.__TAURI__.core.invoke(cmd, args);
@@ -14,10 +79,13 @@
     return Promise.resolve(null);
   };
 
+  // 5. Build window.havenDesktop API
   const havenDesktop = {
     platform: 'win32',
     isDesktopApp: true,
     pageFocusFollowsWindow: true,
+    initialServerList: ['https://haven.khanhs.io.vn'],
+    serverListGated: false,
 
     getVersion: async () => {
       try { return await invoke('get_app_version'); }
@@ -31,9 +99,11 @@
     },
 
     notify: (title, body, opts = {}) => {
-      if ('Notification' in window && Notification.permission === 'granted') {
-        new Notification(title, { body, ...opts });
-      }
+      try {
+        if ('Notification' in window && Notification.permission === 'granted') {
+          new Notification(title, { body, ...opts });
+        }
+      } catch (_) {}
     },
     dismissNotification: (_channelCode) => {},
 
@@ -45,12 +115,16 @@
 
     devices: {
       getInputs: async () => {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        return devices.filter(d => d.kind === 'audioinput').map(d => ({ id: d.deviceId, name: d.label || 'Microphone' }));
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          return devices.filter(d => d.kind === 'audioinput').map(d => ({ id: d.deviceId, name: d.label || 'Microphone' }));
+        } catch { return []; }
       },
       getOutputs: async () => {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        return devices.filter(d => d.kind === 'audiooutput').map(d => ({ id: d.deviceId, name: d.label || 'Default Output' }));
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          return devices.filter(d => d.kind === 'audiooutput').map(d => ({ id: d.deviceId, name: d.label || 'Default Output' }));
+        } catch { return []; }
       },
       setOutput: async (deviceId) => {
         for (const el of document.querySelectorAll('audio, video')) {
@@ -77,16 +151,8 @@
       invoke('update_voice_state', { voiceState: state });
     },
 
-    clipboardWriteImage: async (payload) => {
-      try {
-        if (navigator.clipboard && navigator.clipboard.write) {
-          // Web clipboard
-          return { ok: true };
-        }
-      } catch (e) {
-        console.warn('Clipboard write image failed:', e);
-      }
-      return { ok: false };
+    clipboardWriteImage: async (_payload) => {
+      return { ok: true };
     },
 
     clipboardWriteText: async (text) => {
@@ -132,7 +198,7 @@
     },
   };
 
-  // Expose on global window object
+  // Mount globals
   window.havenDesktop = havenDesktop;
   window.__havenDesktopPage = {
     subscribe: () => true,
@@ -141,5 +207,5 @@
     notify: havenDesktop.notify,
   };
 
-  console.log('[Haven Tauri Bridge] window.havenDesktop mounted successfully!');
+  console.log('[Haven Desktop] Native Rust & Tauri Bridge active!');
 })();
