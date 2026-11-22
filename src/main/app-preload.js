@@ -277,6 +277,9 @@ contextBridge.exposeInMainWorld('__havenDesktopPage', {
   },
   // Soft reload chat without dropping voice
   softReloadChat: () => ipcRenderer.send('chat:request-soft-reload'),
+  voiceStateUpdate: (state) => {
+    ipcRenderer.send('desktop:voice-state-update', state);
+  },
 });
 
 // Events from main that the page world acts on.
@@ -760,6 +763,11 @@ contextBridge.exposeInMainWorld('havenDesktop', {
 
   /** Signal the taskbar/dock badge (no native notification needed) */
   setUnreadBadge: (hasUnread) => ipcRenderer.send('notification-badge', !!hasUnread),
+
+  /** Update dynamic voice state for background throttling */
+  updateVoiceState: (state) => {
+    ipcRenderer.send('desktop:voice-state-update', state);
+  },
 
   window: {
     minimize: () => ipcRenderer.send('window:minimize'),

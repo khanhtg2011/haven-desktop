@@ -583,6 +583,7 @@ function installPageWorld(bridge, deps) {
       asked = Object.create(null);
       socket.on('voice-users-update', (d) => {
         if (d && typeof d.channelCode === 'string' && Array.isArray(d.users)) rosters[d.channelCode] = d.users;
+        if (typeof checkAndDispatchVoiceState === 'function') setTimeout(checkAndDispatchVoiceState, 50);
       });
       socket.on('new-message', (d) => {
         const m = d && d.message;
@@ -934,6 +935,59 @@ function installPageWorld(bridge, deps) {
   }
   on('voice:ptm-down', () => _ptmSetHeld(true, 'hook'));
   on('voice:ptm-up',   () => _ptmSetHeld(false, 'hook'));
+
+  // ─── Dynamic voice state tracking for background throttling ────────
+  let _lastDispatchedVoiceState = { inVoice: false, isMuted: false };
+
+  function checkAndDispatchVoiceState() {
+    let inVoice = false;
+    let isMuted = false;
+
+    const s = typeof _pttState === 'function' ? _pttState() : null;
+    if (s) {
+      inVoice = !!s.inVoice;
+      isMuted = !!s.isMuted;
+    } else {
+      const app = window.app || window._havenApp || null;
+      if (app?.voice && typeof app.voice.inVoice === 'boolean') {
+        inVoice = !!app.voice.inVoice;
+        isMuted = typeof app._micUserMuted === 'function' ? !!app._micUserMuted() : !!app.voice.isMuted;
+      } else {
+        const muteBtn = document.getElementById('voice-mute-btn');
+        if (muteBtn && muteBtn.style?.display !== 'none') {
+          inVoice = true;
+          const pressed = muteBtn.getAttribute('aria-pressed');
+          isMuted = pressed === 'true' || muteBtn.classList.contains('muted') || muteBtn.classList.contains('is-muted');
+        }
+      }
+    }
+
+    if (inVoice !== _lastDispatchedVoiceState.inVoice || isMuted !== _lastDispatchedVoiceState.isMuted) {
+      _lastDispatchedVoiceState = { inVoice, isMuted };
+      if (bridge && typeof bridge.voiceStateUpdate === 'function') {
+        bridge.voiceStateUpdate({ inVoice, isMuted, muted: isMuted });
+      }
+    }
+  }
+
+  // Monitor voice state changes: periodic poll + interaction hooks + voice events
+  if (typeof window !== 'undefined') {
+    setInterval(checkAndDispatchVoiceState, 500);
+
+    const _deferVoiceCheck = () => setTimeout(checkAndDispatchVoiceState, 50);
+
+    ['voice:mute-toggle', 'voice:deafen-toggle', 'voice:ptt-toggle', 'voice:ptt-down', 'voice:ptt-up', 'voice:ptm-down', 'voice:ptm-up'].forEach((ev) => {
+      on(ev, _deferVoiceCheck);
+    });
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('click', (e) => {
+        if (e?.target?.closest?.('#voice-mute-btn, #voice-mute-btn-header, #voice-deafen-btn, #voice-disconnect-btn, .voice-channel-item, [data-voice-channel]')) {
+          _deferVoiceCheck();
+        }
+      }, true);
+    }
+  }
 
   // ─── Hold-mode PTT while the Haven window itself is focused ──────────
   // The native input hook in main drives PTT, but on Windows several people

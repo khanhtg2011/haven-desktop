@@ -322,7 +322,9 @@ app.commandLine.appendSwitch('disable-logging');
 
 // ── Memory management & GPU Optimization: keep the renderer lean (Optimized Electron) ──────────────
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256 --optimize-for-size --expose-gc');
-// Hardware acceleration: enable zero-copy GPU video frames and rasterization
+// Enable OOP rasterization and parallel downloading for smoother rendering
+app.commandLine.appendSwitch('enable-features', 'CanvasOopRasterization,ParallelDownloading');
+// Enable Zero-Copy acceleration and GPU rasterization
 app.commandLine.appendSwitch('enable-gpu-rasterization');
 app.commandLine.appendSwitch('enable-zero-copy');
 // Limit image decode cache (large images/gifs can balloon memory)
@@ -1589,12 +1591,17 @@ function openWebLink(url) {
 
 function keepOnLocalFiles(contents) {
   contents.on('will-navigate', (event, url) => {
+    if (url === 'about:blank') return;
     event.preventDefault();
     openWebLink(url);
   });
-  contents.on('will-redirect', (event) => event.preventDefault());
+  contents.on('will-redirect', (event, url) => {
+    if (url === 'about:blank') return;
+    event.preventDefault();
+  });
   contents.on('will-attach-webview', (event) => event.preventDefault());
   contents.setWindowOpenHandler(({ url }) => {
+    if (url === 'about:blank') return { action: 'allow' };
     openWebLink(url);
     return { action: 'deny' };
   });
@@ -1686,7 +1693,7 @@ function createAppWindow(serverUrl) {
       // Keeping it un-throttled means transient overlays don't add a second
       // throttle layer on top of the per-view setting during screen share. (#5379)
       webPreferences: {
-        backgroundThrottling: false,
+        backgroundThrottling: true,
         preload: path.join(__dirname, 'splash-preload.js'),
         sandbox: false,
       },
@@ -1761,10 +1768,27 @@ function createAppWindow(serverUrl) {
     // ── Dynamic Chat Hibernation & Memory Flush (Voice-First Optimization) ──
     const hibernateChatViews = () => {
       try {
-        if (typeof global.gc === 'function') global.gc();
-        if (activeServerUrl && serverViews.has(activeServerUrl)) {
-          const v = serverViews.get(activeServerUrl);
-          v?.webContents?.session?.clearCache().catch(() => {});
+        for (const view of serverViews.values()) {
+          try {
+            if (view?.webContents && !view.webContents.isDestroyed?.()) {
+              if (typeof view.webContents.cleanUpFreeMemory === 'function') {
+                view.webContents.cleanUpFreeMemory();
+              }
+              view.webContents.session?.clearCache?.().catch?.(() => {});
+            }
+          } catch {}
+        }
+        if (mainWindow?.webContents && !mainWindow.webContents.isDestroyed?.()) {
+          try {
+            if (typeof mainWindow.webContents.cleanUpFreeMemory === 'function') {
+              mainWindow.webContents.cleanUpFreeMemory();
+            }
+          } catch {}
+        }
+        if (typeof global.gc === 'function') {
+          global.gc();
+        } else if (global.gc) {
+          global.gc();
         }
       } catch {}
 
@@ -2123,7 +2147,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         // to 1-second buckets and the AudioContext is auto-suspended, which
         // makes voice-activity indicators go dark until the window is restored
         // AND the AudioContext is explicitly resumed.
-        backgroundThrottling: false,
+        backgroundThrottling: true,
+        autoplayPolicy: 'user-gesture-required',
       },
     });
     mainWindow.addBrowserView(view);
@@ -2149,6 +2174,18 @@ function ensureServerView(serverUrl, { background = false } = {}) {
         view.setAutoResize({ width: true, height: true, horizontal: false, vertical: false });
         mainWindow.setTopBrowserView(view);
         safeSend(view.webContents, 'i18n:became-active', getI18nState());
+        if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+          try {
+            mainWindow.webContents.executeJavaScript(`
+              document.querySelectorAll('.hex, .spinner').forEach(el => {
+                el.style.animation = 'none';
+              });
+            `).catch(() => {});
+          } catch {}
+          try {
+            mainWindow.webContents.loadURL('about:blank').catch(() => {});
+          } catch {}
+        }
       } catch {}
     };
     // Safety net: even if the active server is unreachable, drop the splash
@@ -2802,8 +2839,8 @@ function ensureServerView(serverUrl, { background = false } = {}) {
   return view;
 }
 
-// Optimized Electron: Cap background server preloads to 2 max to save hundreds of MBs of RAM.
-const BACKGROUND_SERVER_CAP = 2;
+// Optimized Electron: Cap background server preloads to 0 to save hundreds of MBs of RAM and disable background preload.
+const BACKGROUND_SERVER_CAP = 0;
 
 function scheduleBackgroundServerPreload(activeServerUrl) {
   // Off-switch: setting `backgroundServerConnections` to false disables
@@ -4766,6 +4803,44 @@ function registerIPC() {
     if (!mainWindow || typeof serverUrl !== 'string' || !/^https?:\/\//i.test(serverUrl)) return;
     const { applied } = await requestServerListChange(e, { kind: 'open', url: serverUrl }, action);
     if (applied && mainWindow) switchToServer(normalizeServerUrl(serverUrl));
+  });
+
+  // ── Dynamic state-aware background throttling for voice ──
+  ipcMain.on('desktop:voice-state-update', (event, state) => {
+    const inVoice = typeof state === 'boolean' ? state : Boolean(state && state.inVoice);
+    const isMuted = typeof state === 'object' && state !== null ? Boolean(state.muted || state.isMuted) : false;
+    const shouldThrottle = !inVoice || isMuted;
+
+    try {
+      if (event?.sender && !event.sender.isDestroyed?.()) {
+        if (typeof event.sender.setBackgroundThrottling === 'function') {
+          event.sender.setBackgroundThrottling(shouldThrottle);
+        }
+      }
+    } catch (err) {
+      console.warn('[Haven Desktop] Failed to set background throttling on sender:', err?.message || err);
+    }
+
+    let matched = false;
+    for (const view of serverViews.values()) {
+      if (view?.webContents === event?.sender) {
+        try {
+          if (!view.webContents.isDestroyed?.() && typeof view.webContents.setBackgroundThrottling === 'function') {
+            view.webContents.setBackgroundThrottling(shouldThrottle);
+          }
+        } catch {}
+        matched = true;
+        break;
+      }
+    }
+    if (!matched && activeServerUrl && serverViews.has(activeServerUrl)) {
+      try {
+        const activeView = serverViews.get(activeServerUrl);
+        if (activeView?.webContents && !activeView.webContents.isDestroyed?.() && typeof activeView.webContents.setBackgroundThrottling === 'function') {
+          activeView.webContents.setBackgroundThrottling(shouldThrottle);
+        }
+      } catch {}
+    }
   });
 
   // ── Checking a new server (#62) ──────────────────────
