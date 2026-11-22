@@ -19,9 +19,9 @@ fn main() {
     #[cfg(target_os = "windows")]
     {
         // 1. Single-Instance Lock: Prevent duplicate Haven processes
-        let mutex_name: Vec<u16> = "Global\\HavenDesktopTauriSingleInstanceMutex\0".encode_utf16().collect();
+        let mutex_name: Vec<u16> = "HavenDesktopTauriSingleInstanceMutex\0".encode_utf16().collect();
         let _handle = unsafe { CreateMutexW(std::ptr::null(), 1, mutex_name.as_ptr()) };
-        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        if _handle != 0 && unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             let title: Vec<u16> = "Haven\0".encode_utf16().collect();
             let hwnd = unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) };
             if hwnd != 0 {
@@ -33,18 +33,10 @@ fn main() {
             return;
         }
 
-        // 2. Auto-grant device permissions (Microphone, Camera, Audio) like Electron
-        // 3. Aggressive RAM optimization: Cap V8 heap to 96MB, limit renderer processes to 1, enable low-end device mode
+        // 2. Auto-grant device permissions (Microphone, Camera, Audio) and enable memory optimizations
         std::env::set_var(
             "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--use-fake-ui-for-media-stream \
-             --autoplay-policy=no-user-gesture-required \
-             --enable-features=HardwareMediaKeyHandling \
-             --disable-features=Translate,OptimizationHints,MediaRouter \
-             --enable-low-end-device-mode \
-             --renderer-process-limit=1 \
-             --js-flags=\"--max-old-space-size=96 --lite-mode\" \
-             --disk-cache-size=16777216",
+            "--use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required --enable-low-end-device-mode --disk-cache-size=16777216",
         );
     }
 

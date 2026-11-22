@@ -29,16 +29,7 @@ const OVERLAY_BRIDGE_SCRIPT: &str = r#"
 "#;
 
 #[cfg(target_os = "windows")]
-pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,Translate,OptimizationHints,MediaRouter \
-    --use-fake-ui-for-media-stream \
-    --autoplay-policy=no-user-gesture-required \
-    --renderer-process-limit=1 \
-    --enable-low-end-device-mode \
-    --js-flags=\"--max-old-space-size=96 --lite-mode\" \
-    --disk-cache-size=16777216 \
-    --disable-background-networking \
-    --disable-component-update \
-    --disable-domain-reliability";
+pub const BROWSER_ARGS: &str = "--use-fake-ui-for-media-stream --autoplay-policy=no-user-gesture-required --enable-low-end-device-mode --disk-cache-size=16777216";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -113,7 +104,7 @@ pub fn run() {
             }
 
             // 3. Periodic Background RAM Working Set Trimmer
-            // Runs every 30s silently to flush unused memory pages from WebView2 processes
+            // Runs every 30s silently to flush unused memory pages from all WebView2 processes
             std::thread::spawn(|| {
                 loop {
                     std::thread::sleep(std::time::Duration::from_secs(30));

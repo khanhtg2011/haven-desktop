@@ -49,32 +49,39 @@ extern "system" {
 
 /// Recursively discovers all child and grandchild processes of root_pid (e.g. all msedgewebview2.exe subprocesses)
 pub fn get_descendant_pids(root_pid: u32) -> Vec<u32> {
-    let mut pids = vec![root_pid];
+    let mut family = std::collections::HashSet::new();
+    family.insert(root_pid);
+
     #[cfg(target_os = "windows")]
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(0x00000002, 0); // TH32CS_SNAPPROCESS
         if snapshot != -1 && snapshot != 0 {
-            let mut added_new = true;
-            while added_new {
-                added_new = false;
-                let mut entry = std::mem::zeroed::<PROCESSENTRY32W>();
-                entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-                if Process32FirstW(snapshot, &mut entry) != 0 {
-                    loop {
-                        if pids.contains(&entry.th32ParentProcessID) && !pids.contains(&entry.th32ProcessID) {
-                            pids.push(entry.th32ProcessID);
-                            added_new = true;
-                        }
-                        if Process32NextW(snapshot, &mut entry) == 0 {
-                            break;
-                        }
+            let mut all_procs: Vec<(u32, u32)> = Vec::new();
+            let mut entry = std::mem::zeroed::<PROCESSENTRY32W>();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            if Process32FirstW(snapshot, &mut entry) != 0 {
+                loop {
+                    all_procs.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                    if Process32NextW(snapshot, &mut entry) == 0 {
+                        break;
                     }
                 }
             }
             CloseHandle(snapshot);
+
+            let mut added = true;
+            while added {
+                added = false;
+                for (pid, parent_pid) in &all_procs {
+                    if family.contains(parent_pid) && !family.contains(pid) {
+                        family.insert(*pid);
+                        added = true;
+                    }
+                }
+            }
         }
     }
-    pids
+    family.into_iter().collect()
 }
 
 /// Flushes working set pages for Haven AND all descendant WebView2 processes (Browser, GPU, Renderer, Audio, Utility)
