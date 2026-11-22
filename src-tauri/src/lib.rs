@@ -73,6 +73,7 @@ pub fn run() {
             }
 
             // 2. Construct In-Game Voice & Chat Overlay Window using Haven's original UI source
+            // Note: Must start with visible(false) to prevent DWM composition race (0x80070578) on transparent windows
             let overlay_builder = WebviewWindowBuilder::new(
                 app_handle,
                 "overlay",
@@ -87,16 +88,20 @@ pub fn run() {
             .shadow(false)
             .always_on_top(true)
             .skip_taskbar(true)
-            .visible(true)
+            .visible(false)
             .initialization_script(OVERLAY_BRIDGE_SCRIPT);
 
             if let Ok(overlay_win) = overlay_builder.build() {
                 let _ = overlay_win.set_ignore_cursor_events(true);
             }
 
-            // Send initial overlay view settings
-            let app_state: tauri::State<AppState> = app_handle.state();
-            commands::send_overlay_view(app_handle, &app_state);
+            // Staggered initialization: send initial view settings after event loop starts
+            let init_app = app_handle.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                let app_state: tauri::State<AppState> = init_app.state();
+                commands::send_overlay_view(&init_app, &app_state);
+            });
 
             // 3. Periodic Background RAM Working Set Trimmer
             let bg_app = app_handle.clone();

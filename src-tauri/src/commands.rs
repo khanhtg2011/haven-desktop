@@ -163,6 +163,7 @@ pub fn set_voice_overlay_enabled(app: AppHandle, state: State<AppState>, enabled
         let last = state.overlay_last_report.lock().unwrap().clone();
         if let Some(r) = last {
             let _ = app.emit_to("overlay", "voice-overlay:state", &r);
+            let _ = app.emit("voice-overlay:state", &r);
         }
     }
     send_overlay_view(&app, &state);
@@ -227,6 +228,7 @@ pub fn report_voice_overlay(app: AppHandle, state: State<AppState>, report: serd
                 let _ = overlay_win.set_ignore_cursor_events(true);
             }
             let _ = app.emit_to("overlay", "voice-overlay:state", &report);
+            let _ = app.emit("voice-overlay:state", &report);
         } else if !settings.persistent_chat && !in_voice && !settings.editing {
             if overlay_win.is_visible().unwrap_or(false) {
                 let _ = overlay_win.hide();
@@ -302,6 +304,7 @@ pub fn send_overlay_view(app: &AppHandle, state: &State<AppState>) {
         }
     });
     let _ = app.emit_to("overlay", "voice-overlay:view", &view_payload);
+    let _ = app.emit("voice-overlay:view", &view_payload);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
