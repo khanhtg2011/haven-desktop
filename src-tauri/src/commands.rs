@@ -133,31 +133,7 @@ pub fn is_voice_overlay_enabled(state: State<AppState>) -> bool {
 #[tauri::command]
 pub fn set_voice_overlay_enabled(app: AppHandle, state: State<AppState>, enabled: bool) -> Result<(), String> {
     state.overlay_settings.lock().unwrap().enabled = enabled;
-    if !enabled {
-        if let Some(w) = app.get_webview_window("overlay") {
-            let _ = w.hide();
-        }
-    } else {
-        let settings = state.overlay_settings.lock().unwrap().clone();
-        if let Some(w) = app.get_webview_window("overlay") {
-            if settings.persistent_chat {
-                let _ = w.show();
-                let _ = w.set_ignore_cursor_events(true);
-            }
-        }
-        let last = state.overlay_last_report.lock().unwrap().clone();
-        if let Some(r) = last {
-            if let Some(w) = app.get_webview_window("overlay") {
-                let in_voice = r.get("inVoice").and_then(|v| v.as_bool()).unwrap_or(false);
-                let has_messages = r.get("messages").and_then(|m| m.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
-                if settings.persistent_chat || in_voice || has_messages {
-                    let _ = w.show();
-                    let _ = w.set_ignore_cursor_events(true);
-                }
-                let _ = app.emit_to("overlay", "voice-overlay:state", &r);
-            }
-        }
-    }
+    crate::native_overlay::set_enabled(enabled);
     send_overlay_view(&app, &state);
     Ok(())
 }
@@ -170,27 +146,9 @@ pub fn toggle_voice_overlay_command(app: AppHandle, state: State<AppState>) -> R
 
 #[tauri::command]
 pub fn toggle_voice_overlay_persistent(app: AppHandle, state: State<AppState>) -> Result<bool, String> {
-    let mut settings = state.overlay_settings.lock().unwrap();
-    settings.persistent_chat = !settings.persistent_chat;
-    let new_val = settings.persistent_chat;
-    let enabled = settings.enabled;
-    drop(settings);
+    let new_val = crate::native_overlay::toggle_persistent();
+    state.overlay_settings.lock().unwrap().persistent_chat = new_val;
     send_overlay_view(&app, &state);
-
-    if let Some(overlay_win) = app.get_webview_window("overlay") {
-        let in_voice = state.overlay_last_report.lock().unwrap().as_ref()
-            .and_then(|r| r.get("inVoice"))
-            .and_then(|v| v.as_bool()).unwrap_or(false);
-        if enabled && (new_val || in_voice) {
-            let _ = overlay_win.show();
-            let _ = overlay_win.set_ignore_cursor_events(true);
-        } else if !new_val && !in_voice {
-            let editing = state.overlay_settings.lock().unwrap().editing;
-            if !editing && overlay_win.is_visible().unwrap_or(false) {
-                let _ = overlay_win.hide();
-            }
-        }
-    }
     Ok(new_val)
 }
 
@@ -201,40 +159,22 @@ pub fn clear_overlay_messages(app: AppHandle, state: State<AppState>) -> Result<
             obj.insert("messages".to_string(), serde_json::json!([]));
         }
     }
+    crate::native_overlay::clear_messages();
     let _ = app.emit("voice-overlay:clear-messages", &serde_json::json!({}));
     Ok(())
 }
 
 #[tauri::command]
 pub fn report_voice_overlay(app: AppHandle, state: State<AppState>, report: serde_json::Value) -> Result<(), String> {
-    let settings = state.overlay_settings.lock().unwrap().clone();
     *state.overlay_last_report.lock().unwrap() = Some(report.clone());
-
-    if let Some(overlay_win) = app.get_webview_window("overlay") {
-        let in_voice = report.get("inVoice").and_then(|v| v.as_bool()).unwrap_or(false);
-        let has_messages = report.get("messages").and_then(|m| m.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
-
-        if settings.enabled && (settings.persistent_chat || in_voice || has_messages) {
-            if !overlay_win.is_visible().unwrap_or(false) {
-                let _ = overlay_win.show();
-                let _ = overlay_win.set_ignore_cursor_events(true);
-            }
-            let _ = app.emit_to("overlay", "voice-overlay:state", &report);
-        } else if !settings.persistent_chat && !in_voice && !settings.editing {
-            if overlay_win.is_visible().unwrap_or(false) {
-                let _ = overlay_win.hide();
-            }
-        }
-    }
+    crate::native_overlay::update_report(report);
+    let _ = app;
     Ok(())
 }
 
 #[tauri::command]
 pub fn voice_overlay_done(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     state.overlay_settings.lock().unwrap().editing = false;
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.set_ignore_cursor_events(true);
-    }
     send_overlay_view(&app, &state);
     Ok(())
 }
@@ -242,15 +182,6 @@ pub fn voice_overlay_done(app: AppHandle, state: State<AppState>) -> Result<(), 
 #[tauri::command]
 pub fn voice_overlay_set_editing(app: AppHandle, state: State<AppState>, editing: bool) -> Result<(), String> {
     state.overlay_settings.lock().unwrap().editing = editing;
-    if let Some(w) = app.get_webview_window("overlay") {
-        if editing {
-            let _ = w.show();
-            let _ = w.set_ignore_cursor_events(false);
-            let _ = w.set_focus();
-        } else {
-            let _ = w.set_ignore_cursor_events(true);
-        }
-    }
     send_overlay_view(&app, &state);
     Ok(())
 }
@@ -258,15 +189,7 @@ pub fn voice_overlay_set_editing(app: AppHandle, state: State<AppState>, editing
 #[tauri::command]
 pub fn voice_overlay_snap(app: AppHandle, state: State<AppState>, corner: String) -> Result<(), String> {
     state.overlay_settings.lock().unwrap().corner = corner.clone();
-    if let Some(w) = app.get_webview_window("overlay") {
-        let pos = match corner.as_str() {
-            "top-right" => (1920 - 360, 20),
-            "bottom-left" => (20, 1080 - 640),
-            "bottom-right" => (1920 - 360, 1080 - 640),
-            _ => (20, 20), // top-left
-        };
-        let _ = w.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(pos.0, pos.1)));
-    }
+    crate::native_overlay::snap_corner(&corner);
     send_overlay_view(&app, &state);
     Ok(())
 }
