@@ -1,4 +1,4 @@
-use crate::net::models::{ChannelItem, HavenEvent, MessageHistoryEvent, NewMessageEvent};
+use crate::net::models::{ChannelItem, HavenEvent, MessageHistoryEvent, NewMessageEvent, OnlineUsersEvent};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -141,6 +141,28 @@ impl HavenSocketClient {
                                                                     log::error!("Deserialization error on new-message: {:?}", e);
                                                                 }
                                                             }
+                                                        }
+                                                    }
+                                                    "online-users" => {
+                                                        if let Some(p) = payload {
+                                                            match serde_json::from_value::<OnlineUsersEvent>(p.clone()) {
+                                                                Ok(online_evt) => {
+                                                                    let _ = event_tx.send(HavenEvent::OnlineUsers(online_evt));
+                                                                }
+                                                                Err(e) => {
+                                                                    log::error!("Deserialization error on online-users: {:?}", e);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    "voice-users-update" | "voice-count-update" => {
+                                                        if let Some(p) = payload {
+                                                            let code = p.get("channelCode").or_else(|| p.get("code")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                                            let users = p.get("users").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                                                            let _ = event_tx.send(HavenEvent::VoiceUsersUpdate {
+                                                                channel_code: code,
+                                                                users,
+                                                            });
                                                         }
                                                     }
                                                     "voice-existing-users" => {

@@ -12,6 +12,8 @@ export struct MessageData {
     attachment-url: string,
     attachment-name: string,
     is-image: bool,
+    image-data: image,
+    has-image: bool,
 }
 
 export component ChatArea inherits Rectangle {
@@ -192,33 +194,34 @@ export component ChatArea inherits Rectangle {
                                 wrap: word-wrap;
                             }
 
-                            // Image Attachment Preview Card
+                            // Image Attachment (Direct Inline Image Viewer)
                             if msg.is-attachment && msg.is-image: Rectangle {
-                                width: 280px;
-                                height: 140px;
-                                border-radius: 6px;
+                                max-width: 440px;
+                                max-height: 260px;
+                                border-radius: 8px;
                                 background: #232428;
                                 clip: true;
 
-                                VerticalLayout {
+                                if msg.has-image: Image {
+                                    source: msg.image-data;
+                                    width: 100%;
+                                    height: 100%;
+                                    image-fit: contain;
+                                }
+
+                                if !msg.has-image: VerticalLayout {
                                     alignment: center;
                                     spacing: 4px;
+                                    padding: 16px;
                                     Text {
-                                        text: "🖼️ Hình ảnh đính kèm";
+                                        text: "🖼️ " + msg.attachment-name;
                                         color: Theme.blurple;
                                         font-size: 13px;
                                         font-weight: 700;
                                         horizontal-alignment: center;
                                     }
                                     Text {
-                                        text: msg.attachment-name;
-                                        color: Theme.text-white;
-                                        font-size: 12px;
-                                        horizontal-alignment: center;
-                                        overflow: elide;
-                                    }
-                                    Text {
-                                        text: "(Bấm để mở ảnh)";
+                                        text: "(Bấm để mở ảnh gốc)";
                                         color: Theme.text-muted;
                                         font-size: 11px;
                                         horizontal-alignment: center;
@@ -302,7 +305,6 @@ export component ChatArea inherits Rectangle {
                     padding-left: 12px;
                     padding-right: 12px;
                     spacing: 12px;
-                    alignment: space-between;
 
                     // Plus Attachment Icon
                     Rectangle {
@@ -310,7 +312,7 @@ export component ChatArea inherits Rectangle {
                         height: 24px;
                         border-radius: 12px;
                         background: plus-touch.has-hover ? Theme.text-muted : #4e5058;
-                        y: 10px;
+                        y: (parent.height - self.height) / 2;
 
                         Text {
                             text: "+";
@@ -326,29 +328,37 @@ export component ChatArea inherits Rectangle {
                         }
                     }
 
-                    // Text Input Field
-                    text-input := TextInput {
-                        text <=> root.current-input;
-                        font-size: 14px;
-                        color: Theme.text-normal;
-                        vertical-alignment: center;
-                        accepted => {
-                            if (root.current-input != "") {
-                                root.send-message(root.current-input);
-                                root.current-input = "";
+                    // Input Field Container (stretches to fill all remaining width)
+                    input-container := Rectangle {
+                        horizontal-stretch: 1;
+                        clip: true;
+
+                        if root.current-input == "": Text {
+                            x: 0px;
+                            y: (parent.height - self.height) / 2;
+                            text: "Gửi tin nhắn tới #" + root.channel-name;
+                            color: Theme.text-muted;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                        }
+
+                        text-input := TextInput {
+                            width: 100%;
+                            height: 100%;
+                            text <=> root.current-input;
+                            font-size: 14px;
+                            color: Theme.text-normal;
+                            vertical-alignment: center;
+                            accepted => {
+                                if (root.current-input != "") {
+                                    root.send-message(root.current-input);
+                                    root.current-input = "";
+                                }
                             }
                         }
                     }
 
-                    // Placeholder text if empty
-                    if root.current-input == "": Text {
-                        text: "Gửi tin nhắn tới #" + root.channel-name;
-                        color: Theme.text-muted;
-                        font-size: 14px;
-                        vertical-alignment: center;
-                    }
-
-                    // Right icons (GIF, Emoji, Send)
+                    // Right icons (Emoji, Send)
                     HorizontalLayout {
                         spacing: 8px;
                         alignment: center;

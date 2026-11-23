@@ -30,6 +30,8 @@ export component MainWindow inherits Window {
     in-out property <[ChannelItemData]> text-channels: [];
     in-out property <[ChannelItemData]> voice-channels: [];
     in-out property <[MessageData]> messages: [];
+    in-out property <[MemberData]> online-members: [];
+    in-out property <[MemberData]> offline-members: [];
     in-out property <bool> is-muted: false;
     in-out property <bool> is-deafened: false;
     in-out property <bool> is-voice-connected: false;
@@ -104,6 +106,9 @@ export component MainWindow inherits Window {
         }
 
         // 4. Right Members Sidebar (240px)
-        members-sidebar := MembersSidebar {}
+        members-sidebar := MembersSidebar {
+            online-members: root.online-members;
+            offline-members: root.offline-members;
+        }
     }
 }

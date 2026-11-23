@@ -72,15 +72,52 @@ pub struct UploadResponse {
     pub mimetype: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserRole {
+    #[serde(default)]
+    pub id: Option<i64>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub level: Option<i64>,
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlineUserItem {
+    pub id: i64,
+    pub username: String,
+    #[serde(default)]
+    pub online: bool,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(rename = "statusText", default)]
+    pub status_text: Option<String>,
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
+    pub role: Option<UserRole>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnlineUsersEvent {
+    #[serde(rename = "channelCode")]
+    pub channel_code: String,
+    pub users: Vec<OnlineUserItem>,
+}
+
 #[derive(Debug, Clone)]
 pub enum HavenEvent {
     Connected(String),
     ChannelsList(Vec<ChannelItem>),
+    OnlineUsers(OnlineUsersEvent),
     MessageHistory(MessageHistoryEvent),
     NewMessage(NewMessageEvent),
     VoiceExistingUsers { channel_code: String, users: Vec<serde_json::Value> },
     VoiceUserJoined { channel_code: Option<String>, user: serde_json::Value },
     VoiceUserLeft { user_id: Option<i64> },
     VoiceSpeaking { user_id: Option<i64>, speaking: bool },
+    VoiceUsersUpdate { channel_code: String, users: Vec<serde_json::Value> },
     Disconnected(String),
 }

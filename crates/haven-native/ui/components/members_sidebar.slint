@@ -14,139 +14,195 @@ export component MembersSidebar inherits Rectangle {
     width: 240px;
     background: Theme.bg-channels;
 
-    in-out property <[MemberData]> members: [
-        {
-            name: "Admin",
-            role: "Developer",
-            avatar-text: "AD",
-            avatar-color: #23a55a,
-            status-color: Theme.green,
-            status-text: "Coding Pure Rust 100%",
-            is-bot: false,
-        },
-        {
-            name: "Haven Music",
-            role: "BOT",
-            avatar-text: "🎵",
-            avatar-color: #f0b232,
-            status-color: Theme.green,
-            status-text: "Streaming 48kHz Opus",
-            is-bot: true,
-        },
-        {
-            name: "Discord Bridge",
-            role: "BOT",
-            avatar-text: "🤖",
-            avatar-color: #5865f2,
-            status-color: Theme.green,
-            status-text: "Synced with Discord",
-            is-bot: true,
-        },
-    ];
+    in-out property <[MemberData]> online-members: [];
+    in-out property <[MemberData]> offline-members: [];
 
-    VerticalLayout {
-        padding-top: 16px;
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 4px;
-        alignment: start;
+    Flickable {
+        VerticalLayout {
+            padding-top: 16px;
+            padding-left: 12px;
+            padding-right: 12px;
+            spacing: 4px;
+            alignment: start;
 
-        // Group Header
-        Text {
-            text: "ONLINE — " + members.length;
-            color: Theme.text-muted;
-            font-size: 11px;
-            font-weight: 700;
-        }
+            // Online Header
+            Text {
+                text: "TRỰC TUYẾN — " + root.online-members.length;
+                color: Theme.text-muted;
+                font-size: 11px;
+                font-weight: 700;
+            }
 
-        for member in members: Rectangle {
-            height: 42px;
-            border-radius: 4px;
-            background: member-touch.has-hover ? Theme.bg-hover : transparent;
+            for member in root.online-members: Rectangle {
+                height: 42px;
+                border-radius: 4px;
+                background: member-touch.has-hover ? Theme.bg-hover : transparent;
 
-            HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 8px;
-                spacing: 10px;
-                alignment: start;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 10px;
+                    alignment: start;
 
-                // Avatar with status dot
-                Rectangle {
-                    width: 32px;
-                    height: 32px;
-                    y: 5px;
-
+                    // Avatar with status dot
                     Rectangle {
                         width: 32px;
                         height: 32px;
-                        border-radius: 16px;
-                        background: member.avatar-color;
+                        y: 5px;
 
-                        Text {
-                            text: member.avatar-text;
-                            color: Theme.text-white;
-                            font-size: 12px;
-                            font-weight: 700;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-
-                    // Status dot
-                    Rectangle {
-                        x: 22px;
-                        y: 22px;
-                        width: 10px;
-                        height: 10px;
-                        border-radius: 5px;
-                        background: member.status-color;
-                        border-width: 2px;
-                        border-color: Theme.bg-channels;
-                    }
-                }
-
-                // Member Name & Subtitle
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 2px;
-
-                    HorizontalLayout {
-                        spacing: 6px;
-                        Text {
-                            text: member.name;
-                            color: member.is-bot ? #5865f2 : Theme.text-white;
-                            font-size: 13px;
-                            font-weight: 600;
-                        }
-
-                        if member.is-bot: Rectangle {
-                            width: 28px;
-                            height: 14px;
-                            border-radius: 3px;
-                            background: Theme.blurple;
-                            y: 2px;
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            border-radius: 16px;
+                            background: member.avatar-color;
 
                             Text {
-                                text: "BOT";
+                                text: member.avatar-text;
                                 color: Theme.text-white;
-                                font-size: 8px;
+                                font-size: 12px;
                                 font-weight: 700;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
                         }
+
+                        // Status dot (Green for online)
+                        Rectangle {
+                            x: 22px;
+                            y: 22px;
+                            width: 10px;
+                            height: 10px;
+                            border-radius: 5px;
+                            background: member.status-color;
+                            border-width: 2px;
+                            border-color: Theme.bg-channels;
+                        }
                     }
 
-                    Text {
-                        text: member.status-text;
-                        color: Theme.text-muted;
-                        font-size: 11px;
-                        overflow: elide;
+                    // Member Name & Subtitle
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+
+                        HorizontalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: member.name;
+                                color: member.is-bot ? #5865f2 : Theme.text-white;
+                                font-size: 13px;
+                                font-weight: 600;
+                            }
+
+                            if member.is-bot: Rectangle {
+                                width: 28px;
+                                height: 14px;
+                                border-radius: 3px;
+                                background: Theme.blurple;
+                                y: 2px;
+
+                                Text {
+                                    text: "BOT";
+                                    color: Theme.text-white;
+                                    font-size: 8px;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        if member.status-text != "": Text {
+                            text: member.status-text;
+                            color: Theme.text-muted;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
                     }
+                }
+
+                member-touch := TouchArea {}
+            }
+
+            // Offline Header
+            if root.offline-members.length > 0: Rectangle {
+                height: 24px;
+                background: transparent;
+                Text {
+                    y: 8px;
+                    text: "NGOÀI TUYẾN — " + root.offline-members.length;
+                    color: Theme.text-muted;
+                    font-size: 11px;
+                    font-weight: 700;
                 }
             }
 
-            member-touch := TouchArea {}
+            for member in root.offline-members: Rectangle {
+                height: 40px;
+                border-radius: 4px;
+                opacity: 0.65;
+                background: off-touch.has-hover ? Theme.bg-hover : transparent;
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 10px;
+                    alignment: start;
+
+                    Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        y: 4px;
+
+                        Rectangle {
+                            width: 32px;
+                            height: 32px;
+                            border-radius: 16px;
+                            background: #4e5058;
+
+                            Text {
+                                text: member.avatar-text;
+                                color: Theme.text-muted;
+                                font-size: 12px;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            x: 22px;
+                            y: 22px;
+                            width: 10px;
+                            height: 10px;
+                            border-radius: 5px;
+                            background: #80848e;
+                            border-width: 2px;
+                            border-color: Theme.bg-channels;
+                        }
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+
+                        Text {
+                            text: member.name;
+                            color: Theme.text-muted;
+                            font-size: 13px;
+                            font-weight: 500;
+                        }
+
+                        if member.status-text != "": Text {
+                            text: member.status-text;
+                            color: Theme.text-muted;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+                    }
+                }
+
+                off-touch := TouchArea {}
+            }
         }
     }
 }

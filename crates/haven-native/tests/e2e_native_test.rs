@@ -71,11 +71,9 @@ async fn test_phase1_to_phase5_master_pipeline() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(received_history.load(Ordering::SeqCst), "Message history should be received");
 
-    println!("\n=== TEST 5: PUBLISH REAL-TIME CHAT MESSAGE ===");
-    let unique_msg = format!("Automated Test E2E: {}", chrono::Local::now().to_rfc3339());
-    client.send_message("f5b41ec5", &unique_msg);
-    tokio::time::sleep(Duration::from_millis(2000)).await;
-    assert!(received_echo.load(Ordering::SeqCst), "Sent message should be received back via broadcast");
+    println!("\n=== TEST 5: REAL-TIME CHAT READY (SPAM DISABLED) ===");
+    // Đã tắt gửi tin nhắn tự động vào channel công khai theo yêu cầu của user
+    println!("Chat client ready. Automated broadcast spam is disabled.");
 
     println!("\n=== TEST 6: WIN32 GAME CLICK-THROUGH OVERLAY ===");
     let overlay = GameOverlay::new().expect("Overlay creation failed");

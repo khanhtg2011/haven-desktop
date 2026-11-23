@@ -35,8 +35,22 @@ struct SavedSession {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("SLINT_BACKEND").is_err() {
+        std::env::set_var("SLINT_BACKEND", "software");
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     log::info!("🚀 Khởi chạy Haven Native Client 100% Rust (Zero WebView2)...");
+
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::StationsAndDesktops::{OpenDesktopW, SetThreadDesktop};
+        let default_name: Vec<u16> = "Default\0".encode_utf16().collect();
+        let h_desk = OpenDesktopW(default_name.as_ptr(), 0, 0, 0x000F01FF); // DESKTOP_ALL_ACCESS
+        if h_desk != 0 {
+            let res = SetThreadDesktop(h_desk);
+            log::info!("Attached to interactive Default desktop: res={}", res);
+        }
+    }
 
     let main_window = MainWindow::new()?;
 
@@ -688,15 +702,80 @@ async fn start_socket_session(
                             }
                         });
                     }
+                    HavenEvent::OnlineUsers(online_evt) => {
+                        let cur_code = active_channel_code.lock().unwrap().clone();
+                        log::info!("Nhận danh sách online-users cho channel {}: {} users (kênh hiện tại: {})", online_evt.channel_code, online_evt.users.len(), cur_code);
+                        let mut online_list: Vec<MemberData> = Vec::new();
+                        let mut offline_list: Vec<MemberData> = Vec::new();
+
+                        for u in online_evt.users {
+                            let is_bot = u.username.to_lowercase().contains("bot") || u.username.to_lowercase().contains("bridge");
+                            let role_name = u.role.as_ref().and_then(|r| r.name.clone()).unwrap_or_else(|| "Member".to_string());
+
+                            let avatar_color = if let Some(role) = &u.role {
+                                if let Some(c) = &role.color {
+                                    parse_hex_color(c).unwrap_or(Color::from_rgb_u8(88, 101, 242))
+                                } else {
+                                    Color::from_rgb_u8(88, 101, 242)
+                                }
+                            } else {
+                                Color::from_rgb_u8(88, 101, 242)
+                            };
+
+                            let status_color = if u.online {
+                                match u.status.as_deref() {
+                                    Some("away") => Color::from_rgb_u8(241, 196, 15), // Yellow
+                                    Some("dnd") => Color::from_rgb_u8(231, 76, 60),  // Red
+                                    _ => Color::from_rgb_u8(35, 165, 90),             // Discord Green
+                                }
+                            } else {
+                                Color::from_rgb_u8(116, 127, 141) // Offline Gray
+                            };
+
+                            let initials = if u.username.len() >= 2 {
+                                u.username[..2].to_uppercase()
+                            } else {
+                                u.username.to_uppercase()
+                            };
+
+                            let member = MemberData {
+                                name: u.username.into(),
+                                role: role_name.into(),
+                                avatar_text: initials.into(),
+                                avatar_color,
+                                status_color,
+                                status_text: u.status_text.unwrap_or_default().into(),
+                                is_bot,
+                            };
+
+                            if u.online {
+                                online_list.push(member);
+                            } else {
+                                offline_list.push(member);
+                            }
+                        }
+
+                        let window_weak = window_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak.upgrade() {
+                                window.set_online_members(Rc::new(VecModel::from(online_list)).into());
+                                window.set_offline_members(Rc::new(VecModel::from(offline_list)).into());
+                            }
+                        });
+                    }
                     HavenEvent::MessageHistory(history) => {
                         let cur_code = active_channel_code.lock().unwrap().clone();
                         if history.channel_code == cur_code {
                             log::info!("Nạp {} tin nhắn lịch sử cho channel {}", history.messages.len(), cur_code);
-                            let msgs: Vec<MessageData> = history.messages.into_iter().map(convert_msg).collect();
+                            let mut processed = Vec::new();
+                            for m in history.messages {
+                                processed.push(process_message(m, BASE_URL).await);
+                            }
                             let window_weak = window_weak.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(window) = window_weak.upgrade() {
-                                    window.set_messages(Rc::new(VecModel::from(msgs)).into());
+                                    let slint_msgs: Vec<MessageData> = processed.into_iter().map(to_slint_message).collect();
+                                    window.set_messages(Rc::new(VecModel::from(slint_msgs)).into());
                                 }
                             });
                         }
@@ -707,10 +786,11 @@ async fn start_socket_session(
                             let u = new_msg.message.username.as_deref().unwrap_or("Unknown");
                             let c = new_msg.message.content.as_deref().unwrap_or("");
                             log::info!("Tin nhắn mới từ [{}]: {}", u, c);
-                            let msg_data = convert_msg(new_msg.message);
+                            let processed = process_message(new_msg.message, BASE_URL).await;
                             let window_weak = window_weak.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(window) = window_weak.upgrade() {
+                                    let msg_data = to_slint_message(processed);
                                     let mut current_msgs: Vec<MessageData> = window.get_messages().iter().collect();
                                     current_msgs.push(msg_data);
                                     window.set_messages(Rc::new(VecModel::from(current_msgs)).into());
@@ -728,6 +808,18 @@ async fn start_socket_session(
                                 window.set_active_voice_channel(channel_code.into());
                             }
                         });
+                    }
+                    HavenEvent::VoiceUsersUpdate { channel_code, users } => {
+                        log::info!("Cập nhật thành viên phòng thoại [{}] ({} users)", channel_code, users.len());
+                        let cur_voice = active_voice_code.lock().unwrap().clone();
+                        if channel_code == cur_voice {
+                            let window_weak = window_weak.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(window) = window_weak.upgrade() {
+                                    window.set_is_voice_connected(true);
+                                }
+                            });
+                        }
                     }
                     HavenEvent::VoiceUserJoined { channel_code, user } => {
                         log::info!("Người dùng mới vào voice [{:?}]: {:?}", channel_code, user);
@@ -791,7 +883,48 @@ fn parse_attachment_content(content: &str) -> (String, bool, bool, String, Strin
     (content.to_string(), false, false, String::new(), String::new())
 }
 
-fn convert_msg(m: ChatMessageItem) -> MessageData {
+struct ProcessedMessage {
+    id: String,
+    author: String,
+    avatar_text: String,
+    avatar_color: Color,
+    timestamp: String,
+    content: String,
+    is_bot: bool,
+    is_attachment: bool,
+    attachment_url: String,
+    attachment_name: String,
+    is_image: bool,
+    local_image_path: Option<std::path::PathBuf>,
+}
+
+async fn ensure_image_cached(base_url: &str, url: &str) -> Option<std::path::PathBuf> {
+    let full_url = if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        format!("{}{}", base_url, url)
+    };
+    let file_name = Path::new(url).file_name()?.to_str()?;
+    let cache_dir = Path::new(".cache/images");
+    let local_path = cache_dir.join(file_name);
+    if local_path.exists() && local_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        return Some(local_path);
+    }
+    let client = reqwest::Client::builder().danger_accept_invalid_certs(true).build().ok()?;
+    if let Ok(resp) = client.get(&full_url).send().await {
+        if resp.status().is_success() {
+            if let Ok(bytes) = resp.bytes().await {
+                let _ = tokio::fs::create_dir_all(cache_dir).await;
+                if tokio::fs::write(&local_path, &bytes).await.is_ok() {
+                    return Some(local_path);
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn process_message(m: ChatMessageItem, base_url: &str) -> ProcessedMessage {
     let username = m.username.unwrap_or_else(|| "Unknown".to_string());
     let raw_content = m.content.unwrap_or_default();
     let created_at = m.created_at.unwrap_or_default();
@@ -804,7 +937,7 @@ fn convert_msg(m: ChatMessageItem) -> MessageData {
         username.to_uppercase()
     };
 
-    let is_bot = username.to_lowercase().contains("bot");
+    let is_bot = username.to_lowercase().contains("bot") || username.to_lowercase().contains("bridge");
     let color = if is_bot {
         Color::from_rgb_u8(88, 101, 242) // Blurple
     } else {
@@ -817,18 +950,67 @@ fn convert_msg(m: ChatMessageItem) -> MessageData {
         created_at
     };
 
-    MessageData {
-        id: format!("{}", m.id).into(),
-        author: username.into(),
-        avatar_text: initials.into(),
+    let local_image_path = if is_image && !attachment_url.is_empty() {
+        ensure_image_cached(base_url, &attachment_url).await
+    } else {
+        None
+    };
+
+    ProcessedMessage {
+        id: format!("{}", m.id),
+        author: username,
+        avatar_text: initials,
         avatar_color: color,
-        timestamp: time_str.into(),
-        content: content.into(),
+        timestamp: time_str,
+        content,
         is_bot,
         is_attachment,
-        attachment_url: attachment_url.into(),
-        attachment_name: attachment_name.into(),
+        attachment_url,
+        attachment_name,
         is_image,
+        local_image_path,
+    }
+}
+
+fn to_slint_message(pm: ProcessedMessage) -> MessageData {
+    let (image_data, has_image) = if let Some(path) = &pm.local_image_path {
+        match slint::Image::load_from_path(path) {
+            Ok(img) => (img, true),
+            Err(e) => {
+                log::warn!("Không thể giải mã ảnh {:?}: {:?}", path, e);
+                (slint::Image::default(), false)
+            }
+        }
+    } else {
+        (slint::Image::default(), false)
+    };
+
+    MessageData {
+        id: pm.id.into(),
+        author: pm.author.into(),
+        avatar_text: pm.avatar_text.into(),
+        avatar_color: pm.avatar_color,
+        timestamp: pm.timestamp.into(),
+        content: pm.content.into(),
+        is_bot: pm.is_bot,
+        is_attachment: pm.is_attachment,
+        attachment_url: pm.attachment_url.into(),
+        attachment_name: pm.attachment_name.into(),
+        is_image: pm.is_image,
+        image_data,
+        has_image,
+    }
+}
+
+fn parse_hex_color(hex: &str) -> Option<Color> {
+    let clean = hex.trim_start_matches('#');
+    if clean.len() == 6 {
+        let r = u8::from_str_radix(&clean[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&clean[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&clean[4..6], 16).ok()?;
+        Some(Color::from_rgb_u8(r, g, b))
+    } else {
+        None
     }
 }
 
