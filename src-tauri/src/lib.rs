@@ -114,6 +114,23 @@ pub fn run() {
                     let app_state: tauri::State<AppState> = init_app.state();
                     commands::send_overlay_view(&init_app, &app_state);
                 });
+
+                // Periodic Background RAM & WebView2 Working Set Trimmer
+                let bg_app = app_handle.clone();
+                std::thread::spawn(move || {
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(20));
+                        if let Some(main_win) = bg_app.get_webview_window("main") {
+                            let _ = main_win.eval("if (window.gc) window.gc();");
+                        }
+                        if let Some(overlay_win) = bg_app.get_webview_window("overlay") {
+                            let _ = overlay_win.eval("if (window.gc) window.gc();");
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                        #[cfg(target_os = "windows")]
+                        crate::tray::trim_working_set();
+                    }
+                });
             }
 
             Ok(())

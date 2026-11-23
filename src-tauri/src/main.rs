@@ -33,17 +33,31 @@ fn main() {
             return;
         }
 
-        // 2. High-Performance Gaming Flags for WebView2:
-        // - CalculateNativeWinOcclusion: Stop GPU compositing completely when game is in front
-        // - IntensiveWakeupThrottling: Stop CPU timer wakeups in background
-        // - disable-background-timer-throttling=false: Throttle non-critical JS timers in background
-        // - disable-renderer-backgrounding=false: Put background renderers in low power
+        // 2. Maximum Low-Memory & High-Performance Gaming Flags for WebView2:
+        // - renderer-process-limit=1: Cap to a single renderer process (saves ~100MB+)
+        // - disable BackForwardCache: Do not keep previous pages in memory (saves ~80MB+)
+        // - NetworkServiceInProcess: Merge network service into main browser process
+        // - js-flags: Bound V8 heap to 128MB with aggressive garbage collection
+        // - CalculateNativeWinOcclusion & IntensiveWakeupThrottling: Stop background rendering
         let current_args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
-        let gaming_args = "--enable-features=CalculateNativeWinOcclusion,IntensiveWakeupThrottling --disable-background-timer-throttling=false --disable-renderer-backgrounding=false";
+        let max_opt_args = [
+            "--renderer-process-limit=1",
+            "--disable-gpu-shader-disk-cache",
+            "--disable-background-networking",
+            "--disable-sync",
+            "--disable-component-update",
+            "--disable-domain-reliability",
+            "--disable-breakpad",
+            "--disable-features=RendererCodeIntegrity,BackForwardCache,MediaEngagementBypassAutoplayPolicies,PreloadMediaEngagementData",
+            "--enable-features=CalculateNativeWinOcclusion,IntensiveWakeupThrottling,NetworkServiceInProcess",
+            "--disable-background-timer-throttling=false",
+            "--disable-renderer-backgrounding=false",
+            "--js-flags=--max-old-space-size=128",
+        ].join(" ");
         let final_args = if current_args.is_empty() {
-            gaming_args.to_string()
+            max_opt_args
         } else {
-            format!("{} {}", current_args, gaming_args)
+            format!("{} {}", current_args, max_opt_args)
         };
         std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", final_args);
     }
