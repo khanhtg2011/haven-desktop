@@ -193,10 +193,31 @@
       /* Hide all web clutter buttons across composer */
       #gif-btn, #poll-btn, #time-btn, #code-btn, #draw-btn, #voice-rec-btn,
       #silent-btn, #burn-btn, #whisper-btn, #sound-effect-btn,
+      #format-btn, #voice-btn, #self-destruct-btn, #sb-sidebar-toggle-btn,
       .input-actions-divider, .btn-gif, .btn-poll, .btn-time,
+      .btn-format, .btn-voice-msg, .btn-self-destruct, .btn-silent,
       .pip-input-resizer,
+      .sidebar-bottom-bar,
       .input-actions-box > button:not(#upload-btn):not(#emoji-btn):not(#composer-plus-btn) {
         display: none !important;
+      }
+
+      /* User Bar at the Bottom */
+      .sidebar-bottom {
+        margin-top: auto !important;
+        border-top: none !important;
+      }
+
+      .user-bar {
+        display: flex !important;
+        align-items: center !important;
+        background: #232428 !important;
+        padding: 6px 10px !important;
+        margin: 0 !important;
+        border-top: 1px solid rgba(255, 255, 255, 0.06) !important;
+        height: 52px !important;
+        box-sizing: border-box !important;
+        gap: 6px !important;
       }
 
       .input-actions-box {
@@ -365,6 +386,20 @@
         }
       });
     });
+
+    // Relocate user bar to bottom of drawer
+    const sidebar = document.querySelector('.sidebar');
+    const userBar = document.querySelector('.user-bar');
+    const sidebarBottom = document.querySelector('.sidebar-bottom');
+    if (sidebar && userBar && sidebarBottom && userBar.parentElement !== sidebarBottom) {
+      sidebarBottom.prepend(userBar);
+      const muteBtn = document.getElementById('voice-mute-btn');
+      const deafenBtn = document.getElementById('voice-deafen-btn');
+      const settingsBtn = document.getElementById('mobile-settings-btn') || document.getElementById('open-settings-btn');
+      if (muteBtn && muteBtn.parentElement !== userBar) { muteBtn.style.display = 'flex'; userBar.appendChild(muteBtn); }
+      if (deafenBtn && deafenBtn.parentElement !== userBar) { deafenBtn.style.display = 'flex'; userBar.appendChild(deafenBtn); }
+      if (settingsBtn && settingsBtn.parentElement !== userBar) { settingsBtn.style.display = 'flex'; userBar.appendChild(settingsBtn); }
+    }
 
     // Replace hamburger menu icon text with back arrow '<' in chat view
     const menuBtn = document.getElementById('mobile-menu-btn');
