@@ -19,6 +19,7 @@ struct ProcessMemoryCounters {
     peak_pagefile_usage: usize,
 }
 
+#[allow(non_snake_case)]
 #[repr(C)]
 struct PROCESSENTRY32W {
     dwSize: u32,
@@ -46,6 +47,34 @@ extern "system" {
     fn Process32NextW(hSnapshot: isize, lppe: *mut PROCESSENTRY32W) -> i32;
     fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> isize;
     fn CloseHandle(hObject: isize) -> i32;
+    fn SetPriorityClass(hProcess: isize, dwPriorityClass: u32) -> i32;
+}
+
+pub const NORMAL_PRIORITY_CLASS: u32 = 0x00000020;
+pub const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x00004000;
+
+/// Drops priority of Haven and all WebView2 child processes so running games get 100% CPU priority (240 FPS)
+pub fn set_gaming_priority(is_gaming_or_unfocused: bool) {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let prio = if is_gaming_or_unfocused {
+            BELOW_NORMAL_PRIORITY_CLASS
+        } else {
+            NORMAL_PRIORITY_CLASS
+        };
+        let my_pid = GetCurrentProcessId();
+        let _ = SetPriorityClass(GetCurrentProcess(), prio);
+        let family_pids = get_descendant_pids(my_pid);
+        for pid in family_pids {
+            if pid != my_pid {
+                let h = OpenProcess(0x0200, 0, pid); // PROCESS_SET_INFORMATION
+                if h != 0 {
+                    let _ = SetPriorityClass(h, prio);
+                    CloseHandle(h);
+                }
+            }
+        }
+    }
 }
 
 /// Recursively discovers all child and grandchild processes of root_pid (e.g. all msedgewebview2.exe subprocesses)
@@ -137,8 +166,9 @@ pub fn get_current_ram_mb() -> usize {
                 }
             }
         }
-        return total_bytes / (1024 * 1024);
+        total_bytes / (1024 * 1024)
     }
+    #[cfg(not(target_os = "windows"))]
     0
 }
 
@@ -238,9 +268,9 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let ram_mb = get_current_ram_mb();
     let initial_tooltip = if ram_mb > 0 {
-        format!("Haven Desktop (Rust) | RAM: {} MB", ram_mb)
+        format!("Haven Desktop (240 FPS Game-Optimized) | RAM: {} MB", ram_mb)
     } else {
-        "Haven Desktop (Rust Ultra-light)".to_string()
+        "Haven Desktop (240 FPS Game-Optimized)".to_string()
     };
 
     let _tray = TrayIconBuilder::new()
@@ -250,6 +280,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => {
+                set_gaming_priority(false);
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.set_focus();
@@ -336,6 +367,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             } = event
             {
                 let app = tray.app_handle();
+                set_gaming_priority(false);
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.set_focus();
@@ -344,7 +376,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                 // Update RAM tooltip on tray click
                 let ram = get_current_ram_mb();
                 if ram > 0 {
-                    let _ = tray.set_tooltip(Some(format!("Haven Desktop (Rust) | RAM: {} MB", ram)));
+                    let _ = tray.set_tooltip(Some(format!("Haven Desktop (240 FPS Game-Optimized) | RAM: {} MB", ram)));
                 }
             }
         })

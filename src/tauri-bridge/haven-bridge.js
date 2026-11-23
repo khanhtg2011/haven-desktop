@@ -15,9 +15,11 @@
   };
 
   // 2. Build window.havenDesktop API immediately (evaluated before any web scripts)
+  const isAndroid = /Android/i.test(navigator.userAgent);
   const havenDesktop = {
-    platform: 'win32',
-    isDesktopApp: true,
+    platform: isAndroid ? 'android' : 'win32',
+    isDesktopApp: !isAndroid,
+    isMobileApp: isAndroid,
 
     window: {
       minimize: () => invoke('window_minimize'),
@@ -34,7 +36,7 @@
       isUpdateAvailable: async () => false,
       installUpdate: () => {},
       openExternal: (url) => {
-        window.open(url, '_blank');
+        invoke('open_external_url', { url });
       },
     },
 
@@ -58,6 +60,239 @@
             body: body || '',
             icon: icon || undefined,
             tag: channelCode || undefined,
+            badge: icon || undefined,
+          });
+          if (channelCode) {
+            n.onclick = () => {
+              window.focus();
+              window.location.hash = channelCode;
+            };
+          }
+        }
+      } catch (_) {}
+    },
+  };
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // 2.1 Android Focus View & Discord Mobile Parity Controller
+  // ══════════════════════════════════════════════════════════════════════════
+  if (isAndroid) {
+    try {
+      window.__DISABLE_PUSH_PROMPT__ = true;
+      if (typeof Notification !== 'undefined') {
+        Notification.requestPermission = () => Promise.resolve('granted');
+      }
+    } catch (_) {}
+
+    // Immediate style injection to suppress push error modals & desktop chrome
+    const suppressStyle = document.createElement('style');
+    suppressStyle.id = 'haven-mobile-suppress-styles';
+    suppressStyle.textContent = `
+      #push-error-modal, #android-beta-modal, #desktop-promo-modal {
+        display: none !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+      #titlebar, .window-controls, .desktop-decorations {
+        display: none !important;
+      }
+    `;
+    (document.head || document.documentElement).appendChild(suppressStyle);
+
+    // Tell Haven it's running inside the mobile app
+    window.addEventListener('message', (e) => {
+      if (e.data && e.data.type === 'haven:ready') {
+        window.postMessage({ type: 'haven:mobile-init', platform: 'android' }, '*');
+      }
+    });
+
+    function initMobileFocusView() {
+      if (document.getElementById('haven-mobile-focus-dock')) return;
+
+      const style = document.createElement('style');
+      style.id = 'haven-mobile-focus-styles';
+      style.textContent = `
+        /* ─── Discord Mobile / Focus View Styles ─── */
+        :root {
+          --mobile-dock-height: 58px;
+          --safe-bottom: env(safe-area-inset-bottom, 0px);
+          --safe-top: env(safe-area-inset-top, 0px);
+        }
+
+        /* Adjust chat layout for bottom dock */
+        #chat, #messages-wrap, #messages {
+          padding-bottom: calc(var(--mobile-dock-height) + var(--safe-bottom) + 8px) !important;
+        }
+
+        #chat-input-area, .chat-input-wrapper {
+          bottom: calc(var(--mobile-dock-height) + var(--safe-bottom)) !important;
+          border-radius: 20px !important;
+          margin: 0 8px 6px 8px !important;
+          background: #23243c !important;
+        }
+
+        /* Focus View Bottom Navigation Dock */
+        #haven-mobile-focus-dock {
+          position: fixed;
+          bottom: 0;
+          left: 0;
+          right: 0;
+          height: calc(var(--mobile-dock-height) + var(--safe-bottom));
+          padding-bottom: var(--safe-bottom);
+          background: #1e1e38;
+          border-top: 1px solid rgba(255, 255, 255, 0.08);
+          display: flex;
+          align-items: center;
+          justify-content: space-around;
+          z-index: 9999;
+          user-select: none;
+          box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.45);
+        }
+
+        .focus-dock-tab {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          flex: 1;
+          height: 100%;
+          color: #949ba4;
+          font-size: 11px;
+          font-weight: 500;
+          text-decoration: none;
+          cursor: pointer;
+          transition: color 0.15s ease, transform 0.15s ease;
+          gap: 3px;
+        }
+
+        .focus-dock-tab svg {
+          width: 22px;
+          height: 22px;
+          fill: currentColor;
+          transition: transform 0.15s ease;
+        }
+
+        .focus-dock-tab.active {
+          color: #7c5cfc;
+          font-weight: 700;
+        }
+
+        .focus-dock-tab.active svg {
+          transform: scale(1.1);
+        }
+
+        .focus-dock-avatar {
+          width: 24px;
+          height: 24px;
+          border-radius: 50%;
+          object-fit: cover;
+          border: 1.5px solid currentColor;
+        }
+
+        /* Rounded Discord Braid Style for Channels */
+        .sidebar {
+          background: #171728 !important;
+          border-top-right-radius: 16px;
+          border-bottom-right-radius: 16px;
+        }
+
+        .channel-item {
+          border-radius: 8px !important;
+          margin: 2px 8px !important;
+        }
+
+        .channel-item.active {
+          background: #313352 !important;
+          color: #fff !important;
+        }
+
+        /* Floating voice pill */
+        #voice-bar {
+          border-radius: 12px !important;
+          margin: 6px 10px !important;
+          background: #2b2d4a !important;
+          border: 1px solid #7c5cfc44 !important;
+        }
+      `;
+      (document.head || document.documentElement).appendChild(style);
+
+      const dock = document.createElement('nav');
+      dock.id = 'haven-mobile-focus-dock';
+      dock.innerHTML = `
+        <div class="focus-dock-tab active" data-tab="server">
+          <svg viewBox="0 0 24 24"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+          <span>Server</span>
+        </div>
+        <div class="focus-dock-tab" data-tab="dms">
+          <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>
+          <span>DMs</span>
+        </div>
+        <div class="focus-dock-tab" data-tab="activity">
+          <svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2zm-2 1H8v-6c0-2.48 1.51-4.5 4-4.5s4 2.02 4 4.5v6z"/></svg>
+          <span>Activity</span>
+        </div>
+        <div class="focus-dock-tab" data-tab="you">
+          <svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+          <span>You</span>
+        </div>
+      `;
+      document.body.appendChild(dock);
+
+      // Handle Tab Switching
+      const tabs = dock.querySelectorAll('.focus-dock-tab');
+      tabs.forEach(tab => {
+        tab.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          tabs.forEach(t => t.classList.remove('active'));
+          tab.classList.add('active');
+
+          const tabName = tab.dataset.tab;
+          if (tabName === 'server') {
+            const menuBtn = document.getElementById('mobile-menu-btn');
+            if (menuBtn) menuBtn.click();
+          } else if (tabName === 'dms') {
+            const homeServer = document.getElementById('home-server');
+            if (homeServer) homeServer.click();
+            const dmToggle = document.getElementById('dm-toggle-header');
+            if (dmToggle) dmToggle.click();
+          } else if (tabName === 'activity') {
+            const mentionsBtn = document.getElementById('mentions-btn');
+            if (mentionsBtn) mentionsBtn.click();
+          } else if (tabName === 'you') {
+            const settingsBtn = document.getElementById('mobile-settings-btn') || document.getElementById('open-settings-btn');
+            if (settingsBtn) settingsBtn.click();
+            else {
+              const userAvatar = document.getElementById('user-bar-avatar');
+              if (userAvatar) userAvatar.click();
+            }
+          }
+        });
+      });
+
+      // Update "You" avatar from user bar if available
+      const checkAvatar = setInterval(() => {
+        const userImg = document.querySelector('#user-bar-avatar img, #user-bar-face');
+        if (userImg && userImg.src) {
+          const youTab = dock.querySelector('[data-tab="you"]');
+          if (youTab) {
+            youTab.innerHTML = `
+              <img src="${userImg.src}" class="focus-dock-avatar" />
+              <span>You</span>
+            `;
+          }
+          clearInterval(checkAvatar);
+        }
+      }, 1000);
+      setTimeout(() => clearInterval(checkAvatar), 15000);
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initMobileFocusView);
+    } else {
+      initMobileFocusView();
+    }
+  }
           });
           n.onclick = () => {
             window.focus();
@@ -130,16 +365,32 @@
 
     saveImage: async ({ bytes, filename } = {}) => {
       try {
-        const blob = await (await fetch(bytes)).blob();
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = filename || 'image.png';
-        a.click();
-        return { ok: true };
+        let buf;
+        if (bytes instanceof ArrayBuffer || bytes instanceof Uint8Array) {
+          buf = Array.from(new Uint8Array(bytes));
+        } else if (typeof bytes === 'string') {
+          if (bytes.startsWith('data:')) {
+            const raw = bytes.slice(bytes.indexOf(',') + 1);
+            const binary = atob(raw);
+            const len = binary.length;
+            const u8 = new Uint8Array(len);
+            for (let i = 0; i < len; i++) u8[i] = binary.charCodeAt(i);
+            buf = Array.from(u8);
+          } else {
+            const res = await fetch(bytes);
+            const arr = await res.arrayBuffer();
+            buf = Array.from(new Uint8Array(arr));
+          }
+        }
+        if (!buf || !buf.length) return { ok: false, error: 'Empty image' };
+        const path = await invoke('save_download_file', { filename: filename || 'haven-image.png', data: buf });
+        return { ok: true, path };
       } catch (e) {
         return { ok: false, error: String(e) };
       }
     },
+
+    downloadFile: (url, suggestedFilename) => downloadFileUrl(url, suggestedFilename),
 
     getServerHistory: async () => {
       try { return await invoke('get_server_history'); }
@@ -336,19 +587,32 @@
     }
   }, true);
 
-  // 8. Voice & In-Game Chat Overlay Reporter Engine
-  // Automatically gathers voice activity, member speaking highlights, and real-time chat messages
+  // 8. Voice & In-Game Chat Overlay Reporter Engine (Gaming & 240 FPS Optimized)
+  // Low-overhead event-driven reporter: sleeps when idle, dynamically throttles
   (function initVoiceOverlayReporter() {
     let lastSent = '';
     let socket = null;
     let rosters = Object.create(null);
     const messages = [];
     let seq = 0;
+    let isOverlayActive = false;
+
+    // Check initial overlay status
+    if (window.__TAURI__ && window.__TAURI__.core) {
+      window.__TAURI__.core.invoke('is_voice_overlay_enabled').then(res => {
+        isOverlayActive = (res === true);
+      }).catch(() => {});
+    }
 
     if (window.__TAURI__ && window.__TAURI__.event) {
       window.__TAURI__.event.listen('voice-overlay:clear-messages', () => {
         messages.length = 0;
         tick();
+      });
+      window.__TAURI__.event.listen('voice-overlay:view', (e) => {
+        if (e && e.payload) {
+          isOverlayActive = (e.payload.enabled === true);
+        }
       });
     }
 
@@ -362,6 +626,7 @@
           rosters[d.channelCode] = d.users;
         }
         tick();
+        scheduleNextTick();
       });
 
       socket.on('new-message', (d) => {
@@ -381,6 +646,7 @@
         });
         if (messages.length > 8) messages.shift();
         tick();
+        scheduleNextTick();
       });
     }
 
@@ -434,6 +700,13 @@
 
     function tick() {
       try {
+        const app = window.app;
+        if (!app || !app.user) return;
+        const inVoice = !!(app.voice && app.voice.inVoice);
+
+        // If user is not in voice and overlay is off, stay completely quiet to save CPU
+        if (!inVoice && !isOverlayActive) return;
+
         const r = report();
         if (!r) return;
         const sig = JSON.stringify(r);
@@ -443,9 +716,113 @@
       } catch (_) {}
     }
 
-    // High-resolution check for responsive speaking highlight animation
-    setInterval(tick, 120);
+    let tickTimer = null;
+    function scheduleNextTick() {
+      if (tickTimer) clearTimeout(tickTimer);
+      const inVoice = !!(window.app && window.app.voice && window.app.voice.inVoice);
+      // Adaptive intervals:
+      // - In-voice with active HUD: 200ms (fluid talking highlight)
+      // - In-voice without HUD (gaming mode): 600ms (low CPU)
+      // - Idle / not in voice: 2500ms (ultra-low CPU sleep)
+      const delay = (inVoice && isOverlayActive) ? 200 : (inVoice ? 600 : 2500);
+      tickTimer = setTimeout(() => {
+        tick();
+        scheduleNextTick();
+      }, delay);
+    }
+
+    scheduleNextTick();
   })();
+
+  // 9. Intercept File Downloads & External Link Navigation
+  async function downloadFileUrl(url, suggestedFilename) {
+    const fullUrl = new URL(url, window.location.origin).href;
+    let filename = (suggestedFilename || '').trim();
+    if (!filename) {
+      try {
+        const u = new URL(fullUrl);
+        filename = decodeURIComponent(u.pathname.split('/').pop() || 'download');
+      } catch {
+        filename = 'download';
+      }
+    }
+
+    if (window.app && typeof window.app._showToast === 'function') {
+      window.app._showToast(`Đang tải xuống: ${filename}...`, 'info');
+    }
+
+    try {
+      const res = await fetch(fullUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      const buffer = await res.arrayBuffer();
+      const data = Array.from(new Uint8Array(buffer));
+      const savedPath = await invoke('save_download_file', { filename, data });
+
+      if (savedPath) {
+        if (window.app && typeof window.app._showToast === 'function') {
+          window.app._showToast(`✓ Đã lưu: ${filename}`, 'success');
+        }
+        havenDesktop.notify({
+          title: 'Tải tệp hoàn tất',
+          body: `${filename} đã được lưu vào thư mục Downloads.`,
+        });
+        return { ok: true, path: savedPath };
+      }
+    } catch (err) {
+      console.error('[Haven Desktop] Download error:', err);
+      if (window.app && typeof window.app._showToast === 'function') {
+        window.app._showToast(`Lỗi tải tệp: ${err.message || err}`, 'error');
+      }
+      return { ok: false, error: String(err) };
+    }
+  }
+
+  window.addEventListener('click', (e) => {
+    const link = e.target.closest('a');
+    if (!link) return;
+    const href = link.getAttribute('href');
+    if (!href || href === '#' || href.startsWith('javascript:')) return;
+
+    // Check if this is a file download link (file attachment card, download attribute, or /uploads/ file)
+    const isFileCard = link.classList.contains('file-download-link');
+    const hasDownloadAttr = link.hasAttribute('download');
+    const isUploadFile = /\/uploads\//.test(href) && !/\.(html|htm)$/i.test(href);
+
+    if (isFileCard || hasDownloadAttr || isUploadFile) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      let filename = link.getAttribute('download') || '';
+      if (!filename) {
+        const nameEl = link.querySelector('.file-name');
+        if (nameEl && nameEl.textContent) {
+          filename = nameEl.textContent.trim();
+        }
+      }
+      downloadFileUrl(href, filename);
+      return;
+    }
+
+    // Check if this is an external link (different origin or target="_blank")
+    try {
+      const parsed = new URL(link.href, window.location.origin);
+      const isDifferentOrigin = parsed.origin !== window.location.origin;
+      const isBlank = link.getAttribute('target') === '_blank';
+
+      if (isDifferentOrigin || isBlank) {
+        const isHavenDeepLink =
+          /^\/(app(\.html)?|c\/[A-Za-z0-9]+)/.test(parsed.pathname) ||
+          parsed.searchParams.has('channel') ||
+          parsed.searchParams.has('message');
+
+        if (!isHavenDeepLink && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) {
+          e.preventDefault();
+          e.stopPropagation();
+          invoke('open_external_url', { url: link.href });
+        }
+      }
+    } catch (_) {}
+  }, true);
 
   console.log('[Haven Desktop] Native Rust & Tauri Bridge active with auto-permissions & Voice Overlay!');
 })();

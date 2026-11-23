@@ -38,8 +38,8 @@ pub struct VoiceOverlaySettings {
 impl Default for VoiceOverlaySettings {
     fn default() -> Self {
         Self {
-            enabled: true,
-            persistent_chat: true,
+            enabled: false,
+            persistent_chat: false,
             only_speaking: false,
             show_messages: true,
             scale: 1.0,
@@ -78,16 +78,18 @@ pub fn get_app_version() -> String {
 }
 
 #[tauri::command]
-pub fn window_minimize(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("main") {
+pub fn window_minimize(_app: AppHandle) -> Result<(), String> {
+    #[cfg(desktop)]
+    if let Some(w) = _app.get_webview_window("main") {
         let _ = w.minimize();
     }
     Ok(())
 }
 
 #[tauri::command]
-pub fn window_maximize(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("main") {
+pub fn window_maximize(_app: AppHandle) -> Result<(), String> {
+    #[cfg(desktop)]
+    if let Some(w) = _app.get_webview_window("main") {
         let is_max = w.is_maximized().unwrap_or(false);
         if is_max {
             let _ = w.unmaximize();
@@ -102,9 +104,11 @@ pub fn window_maximize(app: AppHandle) -> Result<(), String> {
 pub fn window_close(app: AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.hide();
-        let _ = w.eval("if (window.gc) window.gc();");
-        crate::tray::trim_working_set();
     }
+    if let Some(overlay_win) = app.get_webview_window("overlay") {
+        let _ = overlay_win.hide();
+    }
+    crate::tray::set_gaming_priority(true);
     Ok(())
 }
 
@@ -144,34 +148,42 @@ pub fn update_voice_state(state: State<AppState>, voice_state: serde_json::Value
 // ── Voice Overlay Commands ──────────────────────────────────────────────────
 
 pub fn get_or_create_overlay(app: &AppHandle) -> Option<tauri::WebviewWindow> {
-    if let Some(w) = app.get_webview_window("overlay") {
-        return Some(w);
+    #[cfg(not(desktop))]
+    {
+        let _ = app;
+        return None;
     }
-    let overlay_builder = tauri::webview::WebviewWindowBuilder::new(
-        app,
-        "overlay",
-        tauri::WebviewUrl::App("voice-overlay.html".into()),
-    )
-    .title("Haven Voice Overlay")
-    .inner_size(360.0, 640.0)
-    .position(20.0, 20.0)
-    .resizable(false)
-    .decorations(false)
-    .transparent(true)
-    .shadow(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .visible(false)
-    .initialization_script(crate::OVERLAY_BRIDGE_SCRIPT);
-
-    match overlay_builder.build() {
-        Ok(win) => {
-            let _ = win.set_ignore_cursor_events(true);
-            Some(win)
+    #[cfg(desktop)]
+    {
+        if let Some(w) = app.get_webview_window("overlay") {
+            return Some(w);
         }
-        Err(e) => {
-            log::warn!("Could not create overlay window: {}", e);
-            None
+        let overlay_builder = tauri::webview::WebviewWindowBuilder::new(
+            app,
+            "overlay",
+            tauri::WebviewUrl::App("voice-overlay.html".into()),
+        )
+        .title("Haven Voice Overlay")
+        .inner_size(360.0, 640.0)
+        .position(20.0, 20.0)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        .initialization_script(crate::OVERLAY_BRIDGE_SCRIPT);
+
+        match overlay_builder.build() {
+            Ok(win) => {
+                let _ = win.set_ignore_cursor_events(true);
+                Some(win)
+            }
+            Err(e) => {
+                log::warn!("Could not create overlay window: {}", e);
+                None
+            }
         }
     }
 }
@@ -191,6 +203,7 @@ pub fn set_voice_overlay_enabled(app: AppHandle, state: State<AppState>, enabled
     } else {
         if let Some(w) = get_or_create_overlay(&app) {
             let _ = w.show();
+            #[cfg(desktop)]
             let _ = w.set_ignore_cursor_events(true);
         }
         let last = state.overlay_last_report.lock().unwrap().clone();
@@ -225,6 +238,7 @@ pub fn toggle_voice_overlay_persistent(app: AppHandle, state: State<AppState>) -
     if enabled && (new_val || in_voice) {
         if let Some(overlay_win) = get_or_create_overlay(&app) {
             let _ = overlay_win.show();
+            #[cfg(desktop)]
             let _ = overlay_win.set_ignore_cursor_events(true);
         }
     } else if !new_val && !in_voice {
@@ -261,14 +275,15 @@ pub fn report_voice_overlay(app: AppHandle, state: State<AppState>, report: serd
         if let Some(overlay_win) = get_or_create_overlay(&app) {
             if !overlay_win.is_visible().unwrap_or(false) {
                 let _ = overlay_win.show();
+                #[cfg(desktop)]
                 let _ = overlay_win.set_ignore_cursor_events(true);
             }
             let _ = app.emit_to("overlay", "voice-overlay:state", &report);
             let _ = app.emit("voice-overlay:state", &report);
         }
-    } else if !settings.persistent_chat && !in_voice && !settings.editing {
+    } else {
         if let Some(overlay_win) = app.get_webview_window("overlay") {
-            if overlay_win.is_visible().unwrap_or(false) {
+            if !settings.editing && overlay_win.is_visible().unwrap_or(false) {
                 let _ = overlay_win.hide();
             }
         }
@@ -279,8 +294,9 @@ pub fn report_voice_overlay(app: AppHandle, state: State<AppState>, report: serd
 #[tauri::command]
 pub fn voice_overlay_done(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     state.overlay_settings.lock().unwrap().editing = false;
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.set_ignore_cursor_events(true);
+    if let Some(_w) = app.get_webview_window("overlay") {
+        #[cfg(desktop)]
+        let _ = _w.set_ignore_cursor_events(true);
     }
     send_overlay_view(&app, &state);
     Ok(())
@@ -292,9 +308,11 @@ pub fn voice_overlay_set_editing(app: AppHandle, state: State<AppState>, editing
     if let Some(w) = get_or_create_overlay(&app) {
         if editing {
             let _ = w.show();
+            #[cfg(desktop)]
             let _ = w.set_ignore_cursor_events(false);
             let _ = w.set_focus();
         } else {
+            #[cfg(desktop)]
             let _ = w.set_ignore_cursor_events(true);
         }
     }
@@ -362,3 +380,95 @@ pub fn stop_audio_capture() -> Result<(), String> {
 pub fn get_server_history(state: State<AppState>) -> Vec<String> {
     state.server_history.lock().unwrap().clone()
 }
+
+// ── Native Downloads & External Link Handlers ────────────────────────────────
+
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    log::info!("Opening external URL: {}", url);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let clean = url.trim();
+        if clean.starts_with("http://") || clean.starts_with("https://") || clean.starts_with("mailto:") {
+            let _ = std::process::Command::new("cmd")
+                .args(["/c", "start", "", clean])
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn();
+        }
+    }
+    #[cfg(all(unix, not(target_os = "android")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn save_download_file(filename: String, data: Vec<u8>) -> Result<String, String> {
+    if data.is_empty() {
+        return Err("Cannot save empty file".into());
+    }
+
+    let downloads_dir = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map(|p| std::path::PathBuf::from(p).join("Downloads"))
+        .unwrap_or_else(|_| std::env::temp_dir());
+
+    if !downloads_dir.exists() {
+        let _ = std::fs::create_dir_all(&downloads_dir);
+    }
+
+    let clean_name = filename
+        .replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_")
+        .trim()
+        .to_string();
+    let safe_filename = if clean_name.is_empty() {
+        "downloaded_file".to_string()
+    } else {
+        clean_name
+    };
+
+    let (stem, ext) = match safe_filename.rfind('.') {
+        Some(idx) if idx > 0 => (&safe_filename[..idx], &safe_filename[idx..]),
+        _ => (safe_filename.as_str(), ""),
+    };
+
+    let mut dest = downloads_dir.join(&safe_filename);
+    let mut counter = 1;
+    while dest.exists() {
+        let candidate = format!("{} ({}){}", stem, counter, ext);
+        dest = downloads_dir.join(&candidate);
+        counter += 1;
+        if counter > 1000 {
+            break;
+        }
+    }
+
+    log::info!("Saving downloaded file to: {:?}", dest);
+    std::fs::write(&dest, &data).map_err(|e| format!("Failed to write file: {}", e))?;
+
+    Ok(dest.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub fn show_in_folder(_path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let _ = std::process::Command::new("explorer")
+            .args(["/select,", &_path])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    #[cfg(all(unix, not(target_os = "android")))]
+    {
+        if let Some(parent) = std::path::Path::new(&_path).parent() {
+            let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+        }
+    }
+    Ok(())
+}
+

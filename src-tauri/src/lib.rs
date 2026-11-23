@@ -1,11 +1,18 @@
 pub mod commands;
+#[cfg(desktop)]
 pub mod tray;
+#[cfg(not(desktop))]
+pub mod tray {
+    use tauri::AppHandle;
+    pub fn setup_tray(_app: &AppHandle) -> tauri::Result<()> { Ok(()) }
+    pub fn set_gaming_priority(_is_gaming: bool) {}
+    pub fn trim_working_set() {}
+}
 
 use commands::*;
-use tauri::{
-    webview::{PermissionResponse, WebviewWindowBuilder},
-    AppHandle, Manager, WebviewUrl,
-};
+#[cfg(desktop)]
+use tauri::webview::{PermissionResponse, WebviewWindowBuilder};
+use tauri::Manager;
 
 pub const BRIDGE_SCRIPT: &str = include_str!("../../src/tauri-bridge/haven-bridge.js");
 pub const OVERLAY_BRIDGE_SCRIPT: &str = r#"
@@ -45,79 +52,69 @@ pub fn run() {
             let _ = tray::setup_tray(app_handle);
 
             // 1. Construct Main Window from config, bind bridge script & auto-permissions
+            #[cfg(desktop)]
             if let Some(win_cfg) = app.config().app.windows.first() {
                 let mut builder = WebviewWindowBuilder::from_config(app_handle, win_cfg)?;
                 builder = builder
                     .initialization_script(BRIDGE_SCRIPT)
-                    .on_permission_request(|_webview, _kind| PermissionResponse::Allow);
-                let window = builder.build()?;
+                    .on_permission_request(|_webview, _kind| PermissionResponse::Allow)
+                    .on_download(|_webview, event| {
+                        match event {
+                            tauri::webview::DownloadEvent::Requested { url, destination } => {
+                                log::info!("Native download requested for {} to {:?}", url, destination);
+                            }
+                            tauri::webview::DownloadEvent::Finished { url, path, success } => {
+                                log::info!("Native download finished for {}: success={}, path={:?}", url, success, path);
+                            }
+                            _ => {}
+                        }
+                        true
+                    });
+                let _window = builder.build()?;
 
                 // Close-to-Tray: Hide to tray instead of terminating when user clicks Close (✕)
-                let win_clone = window.clone();
-                window.on_window_event(move |event| {
+                let win_clone = _window.clone();
+                let app_h = app_handle.clone();
+                _window.on_window_event(move |event| {
                     match event {
                         tauri::WindowEvent::CloseRequested { api, .. } => {
                             api.prevent_close();
                             let _ = win_clone.hide();
-                            let _ = win_clone.eval("if (window.gc) window.gc();");
-                            tray::trim_working_set();
+                            if let Some(overlay_win) = app_h.get_webview_window("overlay") {
+                                let _ = overlay_win.hide();
+                            }
+                            tray::set_gaming_priority(true);
                         }
                         tauri::WindowEvent::Focused(false) => {
-                            // Deep Working Set Trim when user is gaming or switching windows
-                            let _ = win_clone.eval("if (window.gc) window.gc();");
-                            tray::trim_working_set();
+                            // User is gaming: Yield 100% CPU priority to the game (240 FPS)
+                            tray::set_gaming_priority(true);
+                        }
+                        tauri::WindowEvent::Focused(true) => {
+                            // User returned to Haven: Restore normal priority
+                            tray::set_gaming_priority(false);
                         }
                         _ => {}
                     }
                 });
             }
 
-            // 2. Construct In-Game Voice & Chat Overlay Window using Haven's original UI source
-            // Note: Must start with visible(false) to prevent DWM composition race (0x80070578) on transparent windows
-            let overlay_builder = WebviewWindowBuilder::new(
-                app_handle,
-                "overlay",
-                WebviewUrl::App("voice-overlay.html".into()),
-            )
-            .title("Haven Voice Overlay")
-            .inner_size(360.0, 640.0)
-            .position(20.0, 20.0)
-            .resizable(false)
-            .decorations(false)
-            .transparent(true)
-            .shadow(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .visible(false)
-            .initialization_script(OVERLAY_BRIDGE_SCRIPT);
-
-            if let Ok(overlay_win) = overlay_builder.build() {
-                let _ = overlay_win.set_ignore_cursor_events(true);
+            #[cfg(mobile)]
+            {
+                // Managed by Android MainActivity & WebChromeClient
             }
 
-            // Staggered initialization: send initial view settings after event loop starts
-            let init_app = app_handle.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(800));
-                let app_state: tauri::State<AppState> = init_app.state();
-                commands::send_overlay_view(&init_app, &app_state);
-            });
+            // 2. In-Game Voice & Chat Overlay Window is created on-demand by get_or_create_overlay
 
-            // 3. Periodic Background RAM Working Set Trimmer
-            let bg_app = app_handle.clone();
-            std::thread::spawn(move || {
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(30));
-                    if let Some(main_win) = bg_app.get_webview_window("main") {
-                        let _ = main_win.eval("if (window.gc) window.gc();");
-                    }
-                    if let Some(overlay_win) = bg_app.get_webview_window("overlay") {
-                        let _ = overlay_win.eval("if (window.gc) window.gc();");
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                    tray::trim_working_set();
-                }
-            });
+            // Staggered initialization: send initial view settings after event loop starts
+            #[cfg(desktop)]
+            {
+                let init_app = app_handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(800));
+                    let app_state: tauri::State<AppState> = init_app.state();
+                    commands::send_overlay_view(&init_app, &app_state);
+                });
+            }
 
             Ok(())
         })
@@ -140,7 +137,10 @@ pub fn run() {
             toggle_voice_overlay_command,
             toggle_voice_overlay_persistent,
             clear_overlay_messages,
-            voice_overlay_done
+            voice_overlay_done,
+            open_external_url,
+            save_download_file,
+            show_in_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running haven desktop application");

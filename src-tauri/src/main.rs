@@ -33,8 +33,19 @@ fn main() {
             return;
         }
 
-        // 2. Allow clean WebView2 execution without conflicting flags
-        // Device permissions and autoplay are handled directly via Tauri runtime hooks
+        // 2. High-Performance Gaming Flags for WebView2:
+        // - CalculateNativeWinOcclusion: Stop GPU compositing completely when game is in front
+        // - IntensiveWakeupThrottling: Stop CPU timer wakeups in background
+        // - disable-background-timer-throttling=false: Throttle non-critical JS timers in background
+        // - disable-renderer-backgrounding=false: Put background renderers in low power
+        let current_args = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+        let gaming_args = "--enable-features=CalculateNativeWinOcclusion,IntensiveWakeupThrottling --disable-background-timer-throttling=false --disable-renderer-backgrounding=false";
+        let final_args = if current_args.is_empty() {
+            gaming_args.to_string()
+        } else {
+            format!("{} {}", current_args, gaming_args)
+        };
+        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", final_args);
     }
 
     haven_desktop_lib::run();
