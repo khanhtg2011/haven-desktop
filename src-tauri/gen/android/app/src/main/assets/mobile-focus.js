@@ -3,6 +3,10 @@
 
   // 1. Suppress push notification errors immediately
   window.__DISABLE_PUSH_PROMPT__ = true;
+  try {
+    localStorage.setItem('haven_push_error_dismissed', 'true');
+  } catch(e){}
+
   if (typeof Notification !== 'undefined') {
     try {
       Notification.requestPermission = () => Promise.resolve('granted');
@@ -16,12 +20,25 @@
       pushModal.style.setProperty('opacity', '0', 'important');
       pushModal.style.setProperty('visibility', 'hidden', 'important');
       const dismissBtn = document.getElementById('push-error-dismiss-btn');
-      if (dismissBtn) dismissBtn.click();
+      if (dismissBtn) {
+        try { dismissBtn.click(); } catch(e){}
+      }
+      pushModal.remove();
     }
     const betaModal = document.getElementById('android-beta-modal');
-    if (betaModal) betaModal.style.setProperty('display', 'none', 'important');
+    if (betaModal) {
+      betaModal.style.setProperty('display', 'none', 'important');
+      betaModal.remove();
+    }
     const promoModal = document.getElementById('desktop-promo-modal');
-    if (promoModal) promoModal.style.setProperty('display', 'none', 'important');
+    if (promoModal) {
+      promoModal.style.setProperty('display', 'none', 'important');
+      promoModal.remove();
+    }
+
+    if (window.app && typeof window.app._showPushError === 'function') {
+      window.app._showPushError = function() {};
+    }
   }
 
   // 2. Inject CSS styles for Discord Mobile Parity (Focus View)
@@ -33,7 +50,7 @@
     style.id = 'haven-mobile-focus-styles';
     style.textContent = `
       :root {
-        --mobile-dock-height: 58px;
+        --mobile-dock-height: 54px;
         --safe-bottom: env(safe-area-inset-bottom, 0px);
         --safe-top: env(safe-area-inset-top, 0px);
       }
@@ -54,9 +71,10 @@
 
       /* Top Channel Header: Discord Mobile style */
       .channel-header, #chat-header, .chat-header {
-        height: 52px !important;
-        padding: 0 12px !important;
-        background: #17182b !important;
+        height: 48px !important;
+        min-height: 48px !important;
+        padding: 0 10px !important;
+        background: #2b2d31 !important;
         border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
         display: flex !important;
         align-items: center !important;
@@ -70,13 +88,14 @@
         justify-content: center !important;
         width: 36px !important;
         height: 36px !important;
-        font-size: 28px !important;
+        font-size: 26px !important;
         font-weight: 700 !important;
-        color: #b5bac1 !important;
+        color: #949ba4 !important;
         background: transparent !important;
         border: none !important;
         cursor: pointer !important;
         line-height: 1 !important;
+        padding: 0 !important;
         margin-right: 4px !important;
       }
 
@@ -91,7 +110,7 @@
       }
 
       #channel-header-name {
-        font-size: 16px !important;
+        font-size: 15.5px !important;
         font-weight: 700 !important;
         color: #f2f3f5 !important;
       }
@@ -103,103 +122,176 @@
         justify-content: center !important;
         width: 36px !important;
         height: 36px !important;
-        color: #b5bac1 !important;
+        color: #949ba4 !important;
         background: transparent !important;
         border: none !important;
       }
 
-      /* Adjust message feed for bottom dock & composer */
+      /* Message Area: padding for floating composer & dock */
       #chat, #messages-wrap, #messages, .messages {
-        padding-bottom: calc(var(--mobile-dock-height) + var(--safe-bottom) + 72px) !important;
+        padding-bottom: calc(var(--mobile-dock-height) + var(--safe-bottom) + 70px) !important;
       }
 
-      /* Composer Bar: Discord Mobile clean pill input */
+      /* Discord Mobile Floating Pill Composer */
       #message-input-area, .message-input-area {
         position: fixed !important;
         left: 8px !important;
         right: 8px !important;
         bottom: calc(var(--mobile-dock-height) + var(--safe-bottom) + 6px) !important;
-        background: #1e1f35 !important;
-        border-radius: 24px !important;
+        background: #383a40 !important;
+        border-radius: 22px !important;
         border: 1px solid rgba(255, 255, 255, 0.08) !important;
-        padding: 4px 8px !important;
+        padding: 3px 6px !important;
         display: flex !important;
+        flex-direction: row !important;
         align-items: center !important;
-        gap: 6px !important;
-        z-index: 9998 !important;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35) !important;
+        gap: 4px !important;
+        z-index: 99995 !important;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4) !important;
+        box-sizing: border-box !important;
       }
 
-      /* Message input box */
+      /* Single Attachment (+) Pill Button */
+      #upload-btn, .btn-upload {
+        order: 1 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
+        border-radius: 50% !important;
+        background: #4e5058 !important;
+        color: #dbdee1 !important;
+        border: none !important;
+        cursor: pointer !important;
+        flex-shrink: 0 !important;
+        padding: 0 !important;
+        margin: 0 !important;
+      }
+
+      #upload-btn svg, #upload-btn .upload-icon-clippy {
+        display: none !important;
+      }
+
+      #upload-btn::before {
+        content: '+' !important;
+        display: block !important;
+        font-size: 22px !important;
+        font-weight: 600 !important;
+        line-height: 1 !important;
+        color: #dbdee1 !important;
+        margin-top: -2px !important;
+      }
+
+      /* Text Input */
       #message-input, .message-input {
-        flex: 1 !important;
+        order: 2 !important;
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
         display: block !important;
         background: transparent !important;
         border: none !important;
         color: #f2f3f5 !important;
-        font-size: 15px !important;
-        padding: 8px 6px !important;
+        font-size: 14.5px !important;
+        padding: 6px 6px !important;
         outline: none !important;
         resize: none !important;
-        max-height: 120px !important;
-        line-height: 1.4 !important;
+        max-height: 100px !important;
+        line-height: 1.35 !important;
+        margin: 0 !important;
       }
 
-      /* Attachment (+) button on the left */
-      #upload-btn, .btn-upload, #composer-plus-btn, .btn-composer-plus {
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        width: 34px !important;
-        height: 34px !important;
-        border-radius: 50% !important;
-        background: #2b2d48 !important;
-        color: #b5bac1 !important;
-        border: none !important;
-        cursor: pointer !important;
-        flex-shrink: 0 !important;
-        font-size: 20px !important;
-        font-weight: 700 !important;
-      }
-
-      /* Emoji smile button on the right */
+      /* Emoji Button */
       #emoji-btn, .btn-emoji {
+        order: 3 !important;
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
-        width: 34px !important;
-        height: 34px !important;
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
         background: transparent !important;
         color: #b5bac1 !important;
         border: none !important;
         cursor: pointer !important;
         flex-shrink: 0 !important;
+        padding: 0 !important;
+        margin: 0 !important;
       }
 
-      /* Send button on the right */
+      #emoji-btn svg {
+        width: 22px !important;
+        height: 22px !important;
+      }
+
+      /* Send Button */
       #send-btn, .btn-send {
-        background: #7c5cfc !important;
+        order: 4 !important;
+        background: #5865F2 !important;
         border-radius: 50% !important;
-        width: 34px !important;
-        height: 34px !important;
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
         display: flex !important;
         align-items: center !important;
         justify-content: center !important;
         border: none !important;
         flex-shrink: 0 !important;
-        color: #fff !important;
+        color: #ffffff !important;
+        cursor: pointer !important;
+        padding: 0 !important;
+        margin: 0 0 0 2px !important;
       }
 
-      /* Hide all web clutter buttons across composer */
-      #gif-btn, #poll-btn, #time-btn, #code-btn, #draw-btn, #voice-rec-btn,
-      #silent-btn, #burn-btn, #whisper-btn, #sound-effect-btn,
-      #format-btn, #voice-btn, #self-destruct-btn, #sb-sidebar-toggle-btn,
-      .input-actions-divider, .btn-gif, .btn-poll, .btn-time,
-      .btn-format, .btn-voice-msg, .btn-self-destruct, .btn-silent,
+      #send-btn svg {
+        width: 16px !important;
+        height: 16px !important;
+        margin-left: 2px !important;
+      }
+
+      /* Hide ALL clutter buttons & duplicate plus */
+      #composer-plus-btn,
+      .btn-composer-plus,
+      #gif-btn,
+      .btn-gif,
+      #poll-btn,
+      .btn-poll,
+      #time-btn,
+      .btn-time,
+      #format-btn,
+      .btn-format,
+      #voice-btn,
+      .btn-voice-msg,
+      #self-destruct-btn,
+      .btn-self-destruct,
+      #silent-btn,
+      .btn-silent,
+      #highlight-btn,
+      .btn-highlight,
+      #burn-btn,
+      .btn-burn,
+      #sb-sidebar-toggle-btn,
+      .sb-sidebar-toggle-btn,
       .pip-input-resizer,
+      .input-actions-divider,
+      .braid-more-wrap,
+      #braid-more-btn,
+      #braid-theme-btn,
+      #braid-classic-btn,
+      .braid-bar-btn,
       .sidebar-bottom-bar,
-      .input-actions-box > button:not(#upload-btn):not(#emoji-btn):not(#composer-plus-btn) {
+      #braid-return-pill {
         display: none !important;
+        visibility: hidden !important;
+        width: 0 !important;
+        height: 0 !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+
+      .input-actions-box {
+        display: contents !important;
       }
 
       /* User Bar at the Bottom */
@@ -220,47 +312,26 @@
         gap: 6px !important;
       }
 
-      .input-actions-box {
-        display: contents !important;
-      }
-
-      /* Floating Voice Pill */
-      #voice-bar {
-        position: fixed !important;
-        top: 56px !important;
-        left: 12px !important;
-        right: 12px !important;
-        background: #2b2b46 !important;
-        border: 1px solid #7c5cfc55 !important;
-        border-radius: 20px !important;
-        padding: 6px 14px !important;
-        display: flex !important;
-        align-items: center !important;
-        gap: 8px !important;
-        z-index: 9997 !important;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
-      }
-
-      /* Slide-out Sidebar Drawer (Discord Mobile style) */
+      /* Slide-out Sidebar Drawer */
       .sidebar {
-        background: #17182b !important;
-        border-top-right-radius: 20px !important;
-        border-bottom-right-radius: 20px !important;
-        width: 84vw !important;
-        max-width: 340px !important;
+        background: #2b2d31 !important;
+        border-top-right-radius: 16px !important;
+        border-bottom-right-radius: 16px !important;
+        width: 82vw !important;
+        max-width: 320px !important;
         padding-bottom: calc(var(--mobile-dock-height) + var(--safe-bottom) + 16px) !important;
         box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5) !important;
       }
 
       .channel-item {
-        border-radius: 12px !important;
-        margin: 3px 10px !important;
-        padding: 8px 12px !important;
-        transition: background 0.15s ease !important;
+        border-radius: 8px !important;
+        margin: 2px 8px !important;
+        padding: 7px 10px !important;
+        cursor: pointer !important;
       }
 
       .channel-item.active {
-        background: #2b2d4a !important;
+        background: rgba(255, 255, 255, 0.12) !important;
         color: #ffffff !important;
         font-weight: 600 !important;
       }
@@ -273,14 +344,14 @@
         right: 0;
         height: calc(var(--mobile-dock-height) + var(--safe-bottom));
         padding-bottom: var(--safe-bottom);
-        background: #121324;
+        background: #1e1f22;
         border-top: 1px solid rgba(255, 255, 255, 0.08);
         display: flex;
         align-items: center;
         justify-content: space-around;
         z-index: 99999;
         user-select: none;
-        box-shadow: 0 -2px 14px rgba(0, 0, 0, 0.5);
+        box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.4);
       }
 
       .focus-dock-tab {
@@ -291,12 +362,13 @@
         flex: 1;
         height: 100%;
         color: #949ba4;
-        font-size: 11px;
+        font-size: 10.5px;
         font-weight: 500;
         text-decoration: none;
         cursor: pointer;
         transition: color 0.15s ease, transform 0.15s ease;
         gap: 3px;
+        -webkit-tap-highlight-color: transparent;
       }
 
       .focus-dock-tab svg {
@@ -307,12 +379,12 @@
       }
 
       .focus-dock-tab.active {
-        color: #7c5cfc;
+        color: #5865F2;
         font-weight: 700;
       }
 
       .focus-dock-tab.active svg {
-        transform: scale(1.12);
+        transform: scale(1.1);
       }
 
       .focus-dock-avatar {
@@ -327,7 +399,81 @@
     dismissModals();
   }
 
-  // 3. Inject Bottom Dock HTML and Event Listeners
+  // 3. Double click on channel to directly join voice!
+  function triggerVoiceJoin(code) {
+    if (!code) return;
+    if (window.app && typeof window.app.switchChannel === 'function') {
+      if (window.app.currentChannel === code) {
+        if (typeof window.app._joinVoice === 'function') window.app._joinVoice();
+        else document.getElementById('voice-join-btn')?.click();
+      } else {
+        const p = window.app.switchChannel(code);
+        const join = () => {
+          if (typeof window.app._joinVoice === 'function') window.app._joinVoice();
+          else document.getElementById('voice-join-btn')?.click();
+        };
+        if (p && typeof p.then === 'function') {
+          p.then(() => setTimeout(join, 150));
+        } else {
+          setTimeout(join, 150);
+        }
+      }
+    } else {
+      document.getElementById('voice-join-btn')?.click();
+    }
+  }
+
+  // Double click listener (Desktop & Mouse)
+  document.addEventListener('dblclick', (e) => {
+    const item = e.target.closest('.channel-item');
+    if (!item) return;
+    if (e.target.closest('.channel-more-btn') || e.target.closest('.channel-collapse-arrow')) return;
+
+    const code = item.dataset.code;
+    if (code) {
+      e.preventDefault();
+      e.stopPropagation();
+      triggerVoiceJoin(code);
+    }
+  }, true);
+
+  // Rapid double-tap tracking (< 450ms) for Touch / Mobile
+  let lastTapTime = 0;
+  let lastTapCode = null;
+
+  function checkDoubleTap(item, e) {
+    if (!item) return;
+    if (e.target.closest('.channel-more-btn') || e.target.closest('.channel-collapse-arrow')) return;
+
+    const code = item.dataset.code;
+    if (!code) return;
+
+    const now = Date.now();
+    if (lastTapCode === code && (now - lastTapTime) < 450) {
+      e.preventDefault();
+      e.stopPropagation();
+      triggerVoiceJoin(code);
+      lastTapTime = 0;
+      lastTapCode = null;
+      return true;
+    }
+
+    lastTapTime = now;
+    lastTapCode = code;
+    return false;
+  }
+
+  document.addEventListener('click', (e) => {
+    const item = e.target.closest('.channel-item');
+    if (item) checkDoubleTap(item, e);
+  }, true);
+
+  document.addEventListener('touchend', (e) => {
+    const item = e.target.closest('.channel-item');
+    if (item) checkDoubleTap(item, e);
+  }, { passive: false });
+
+  // 4. Inject Bottom Dock HTML and Event Listeners
   function injectDock() {
     dismissModals();
     if (document.getElementById('haven-mobile-focus-dock')) return;
@@ -387,7 +533,14 @@
       });
     });
 
-    // Relocate user bar to bottom of drawer
+    // Relocate user bar to bottom of drawer & clean composer
+    document.querySelectorAll(
+      '.braid-more-wrap, #braid-more-btn, #braid-theme-btn, #braid-classic-btn, .sidebar-bottom-bar, #composer-plus-btn, #gif-btn, #poll-btn, #time-btn, #format-btn, #voice-btn, #self-destruct-btn, #silent-btn, #highlight-btn, #burn-btn, #sb-sidebar-toggle-btn'
+    ).forEach(el => {
+      el.style.setProperty('display', 'none', 'important');
+      el.remove();
+    });
+
     const sidebar = document.querySelector('.sidebar');
     const userBar = document.querySelector('.user-bar');
     const sidebarBottom = document.querySelector('.sidebar-bottom');
