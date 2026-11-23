@@ -34,6 +34,9 @@ Thumbs.db
 
 # Arena & Rust build artifacts
 .arena/
+target/
+**/target/
+crates/**/target/
 src-tauri/target/
 src-tauri/gen/android/.gradle/
 src-tauri/gen/android/app/build/

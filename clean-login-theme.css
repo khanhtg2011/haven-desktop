@@ -1,0 +1,126 @@
+/* ===================================================
+   HAVEN: GIAO DIỆN ĐĂNG NHẬP / ĐĂNG KÝ TỐI GIẢN (CLEAN)
+   =================================================== */
+
+/* Khung viền và nền form gọn gàng, bo tròn hiện đại */
+.auth-card {
+  background: #16181f !important;
+  border: 1px solid #282b36 !important;
+  border-radius: 16px !important;
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.6) !important;
+  padding: 30px !important;
+}
+
+/* Tab chuyển đổi: Đăng nhập / Đăng ký */
+.auth-tabs {
+  background: #0e1015 !important;
+  border: 1px solid #20232c !important;
+  border-radius: 10px !important;
+  padding: 4px !important;
+  margin-bottom: 20px !important;
+}
+
+.auth-tab {
+  border-radius: 7px !important;
+  border: none !important;
+  color: #8b92a5 !important;
+  font-weight: 500 !important;
+  padding: 8px !important;
+  transition: all 0.2s ease !important;
+}
+
+.auth-tab:hover {
+  color: #ffffff !important;
+}
+
+.auth-tab.active {
+  background: #5865f2 !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+}
+
+/* Các ô nhập liệu: Tên tài khoản, Mật khẩu */
+.form-group input,
+.form-select,
+textarea {
+  background: #0e1015 !important;
+  border: 1px solid #282b36 !important;
+  border-radius: 8px !important;
+  color: #f1f5f9 !important;
+  padding: 11px 14px !important;
+  font-size: 0.95rem !important;
+  box-sizing: border-box !important;
+  width: 100% !important;
+}
+
+.form-group input:focus,
+.form-select:focus,
+textarea:focus {
+  border-color: #5865f2 !important;
+  outline: none !important;
+  box-shadow: 0 0 0 2px rgba(88, 101, 242, 0.3) !important;
+}
+
+.form-group label {
+  color: #94a3b8 !important;
+  font-size: 0.8rem !important;
+  font-weight: 600 !important;
+  margin-bottom: 4px !important;
+}
+
+/* Nút bấm Đăng nhập / Tạo tài khoản */
+.btn-primary {
+  background: #5865f2 !important;
+  border: none !important;
+  border-radius: 8px !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  font-size: 0.95rem !important;
+  padding: 12px !important;
+  margin-top: 8px !important;
+  cursor: pointer !important;
+  transition: background 0.2s ease !important;
+}
+
+.btn-primary:hover {
+  background: #4752c4 !important;
+}
+
+/* Nút phụ (SSO, Khách, v.v.) */
+.btn-secondary {
+  background: #20232c !important;
+  border: 1px solid #2e323e !important;
+  border-radius: 8px !important;
+  color: #e2e8f0 !important;
+  padding: 9px 16px !important;
+}
+
+.btn-secondary:hover {
+  background: #282c37 !important;
+}
+
+/* Logo và thông báo máy chủ */
+.auth-server-logo {
+  border-radius: 12px !important;
+}
+
+.auth-login-message {
+  background: rgba(88, 101, 242, 0.1) !important;
+  border: 1px solid rgba(88, 101, 242, 0.25) !important;
+  border-radius: 8px !important;
+  color: #cbd5e1 !important;
+  padding: 8px 12px !important;
+}
+
+/* Liên kết phụ: Quên mật khẩu, quay lại */
+.auth-recovery-links a,
+#guest-back-btn {
+  color: #8b92a5 !important;
+  text-decoration: none !important;
+  font-size: 0.85rem !important;
+}
+
+.auth-recovery-links a:hover,
+#guest-back-btn:hover {
+  color: #c7d2fe !important;
+}
