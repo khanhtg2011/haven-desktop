@@ -1946,12 +1946,13 @@ dependencies = [
 
 [[package]]
 name = "haven-native"
-version = "0.2.0-pre.1"
+version = "0.2.0-pre.3"
 dependencies = [
  "chrono",
  "cpal",
  "env_logger",
  "futures-util",
+ "image",
  "log",
  "reqwest",
  "ringbuf",
@@ -2639,6 +2640,9 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif",
+ "image-webp",
  "moxcms",
  "num-traits",
  "png",
@@ -4437,9 +4441,9 @@ dependencies = [
 
 [[package]]
 name = "ringbuf"
-version = "0.4.8"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe47b720588c8702e34b5979cb3271a8b1842c7cb6f57408efa70c779363488c"
+checksum = "b58b631e416dd7d84549d7e6a50f767e111f9b03e30d04f40072f6618f386aaf"
 dependencies = [
  "crossbeam-utils",
  "portable-atomic",

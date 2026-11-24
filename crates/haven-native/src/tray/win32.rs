@@ -91,7 +91,7 @@ pub mod imp {
                 0
             }
             WM_COMMAND => {
-                let id = wparam as usize;
+                let id = wparam;
                 if let Ok(guard) = get_callbacks().lock() {
                     if let Some(cb) = guard.as_ref() {
                         match id {
@@ -132,7 +132,7 @@ pub mod imp {
                     hInstance: hinstance,
                     hIcon: 0 as HICON,
                     hCursor: 0 as HCURSOR,
-                    hbrBackground: 0 as isize,
+                    hbrBackground: 0_isize,
                     lpszMenuName: std::ptr::null(),
                     lpszClassName: class_name.as_ptr(),
                     hIconSm: 0 as HICON,

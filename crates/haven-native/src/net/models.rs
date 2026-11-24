@@ -11,8 +11,14 @@ pub struct PublicConfig {
 pub struct UserInfo {
     pub id: i64,
     pub username: String,
+    #[serde(default)]
     pub display_name: Option<String>,
+    #[serde(default)]
     pub is_admin: Option<bool>,
+    #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(rename = "statusText", default)]
+    pub status_text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +50,8 @@ pub struct ChatMessageItem {
     pub username: Option<String>,
     #[serde(default)]
     pub user_id: Option<i64>,
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +118,7 @@ pub struct OnlineUsersEvent {
 #[derive(Debug, Clone)]
 pub enum HavenEvent {
     Connected(String),
+    SessionInfo(UserInfo),
     ChannelsList(Vec<ChannelItem>),
     OnlineUsers(OnlineUsersEvent),
     MessageHistory(MessageHistoryEvent),

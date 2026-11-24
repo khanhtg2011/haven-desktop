@@ -7,6 +7,7 @@ mod net;
 mod overlay;
 mod tray;
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::rc::Rc;
@@ -61,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket_client_holder = Arc::new(Mutex::new(Option::<Arc<HavenSocketClient>>::None));
     let current_token = Arc::new(Mutex::new(String::new()));
     let api_client = Arc::new(HavenApiClient::new(BASE_URL));
+    let user_avatars = Arc::new(Mutex::new(HashMap::<String, String>::new()));
 
     // 0. Khởi tạo Native Audio Engine (WASAPI + Lock-Free Ringbuffer)
     let audio_engine = match AudioEngine::new() {
@@ -362,6 +364,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let active_voice_code = active_voice_code.clone();
         let channels_cache = channels_cache.clone();
         let current_token = current_token.clone();
+        let user_avatars = user_avatars.clone();
 
         main_window.on_do_login(move |username, password| {
             let u = username.to_string();
@@ -373,6 +376,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let active_voice_code = active_voice_code.clone();
             let channels_cache = channels_cache.clone();
             let current_token = current_token.clone();
+            let user_avatars = user_avatars.clone();
 
             log::info!("Nhận yêu cầu đăng nhập từ tài khoản: {}", u);
 
@@ -403,6 +407,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             active_channel_code,
                             active_voice_code,
                             channels_cache,
+                            user_avatars,
                         ).await;
                     }
                     Err(e) => {
@@ -599,6 +604,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let active_channel_code = active_channel_code.clone();
                 let active_voice_code = active_voice_code.clone();
                 let channels_cache = channels_cache.clone();
+                let user_avatars = user_avatars.clone();
 
                 tokio::spawn(async move {
                     start_socket_session(
@@ -609,6 +615,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         active_channel_code,
                         active_voice_code,
                         channels_cache,
+                        user_avatars,
                     ).await;
                 });
             }
@@ -620,6 +627,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_socket_session(
     token: &str,
     username: &str,
@@ -628,6 +636,7 @@ async fn start_socket_session(
     active_channel_code: Arc<Mutex<String>>,
     active_voice_code: Arc<Mutex<String>>,
     channels_cache: Arc<Mutex<Vec<ChannelItem>>>,
+    user_avatars: Arc<Mutex<HashMap<String, String>>>,
 ) {
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<HavenEvent>();
 
@@ -651,6 +660,40 @@ async fn start_socket_session(
                 match event {
                     HavenEvent::Connected(sid) => {
                         log::info!("WebSocket đã kết nối. SID: {}", sid);
+                    }
+                    HavenEvent::SessionInfo(user_info) => {
+                        log::info!("Nhận SessionInfo: id={} username={} avatar={:?} status={:?}",
+                            user_info.id, user_info.username, user_info.avatar, user_info.status_text);
+                        if let Some(av) = &user_info.avatar {
+                            user_avatars.lock().unwrap().insert(user_info.username.clone(), av.clone());
+                        }
+
+                        let avatar_path = if let Some(av) = &user_info.avatar {
+                            ensure_cached_avatar_as_png(BASE_URL, av).await
+                        } else {
+                            None
+                        };
+
+                        let u_name = user_info.username.clone();
+                        let initials = if u_name.len() >= 2 {
+                            u_name[..2].to_uppercase()
+                        } else {
+                            u_name.to_uppercase()
+                        };
+
+                        let window_weak = window_weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(window) = window_weak.upgrade() {
+                                window.set_current_username(u_name.into());
+                                window.set_current_user_avatar_text(initials.into());
+                                if let Some(path) = avatar_path {
+                                    if let Ok(img) = slint::Image::load_from_path(&path) {
+                                        window.set_current_user_avatar(img);
+                                        window.set_has_current_user_avatar(true);
+                                    }
+                                }
+                            }
+                        });
                     }
                     HavenEvent::ChannelsList(channels) => {
                         log::info!("Nhận danh sách {} kênh từ máy chủ", channels.len());
@@ -705,10 +748,13 @@ async fn start_socket_session(
                     HavenEvent::OnlineUsers(online_evt) => {
                         let cur_code = active_channel_code.lock().unwrap().clone();
                         log::info!("Nhận danh sách online-users cho channel {}: {} users (kênh hiện tại: {})", online_evt.channel_code, online_evt.users.len(), cur_code);
-                        let mut online_list: Vec<MemberData> = Vec::new();
-                        let mut offline_list: Vec<MemberData> = Vec::new();
+                        let mut processed_members: Vec<ProcessedMember> = Vec::new();
 
                         for u in online_evt.users {
+                            if let Some(av) = &u.avatar {
+                                user_avatars.lock().unwrap().insert(u.username.clone(), av.clone());
+                            }
+
                             let is_bot = u.username.to_lowercase().contains("bot") || u.username.to_lowercase().contains("bridge");
                             let role_name = u.role.as_ref().and_then(|r| r.name.clone()).unwrap_or_else(|| "Member".to_string());
 
@@ -738,26 +784,60 @@ async fn start_socket_session(
                                 u.username.to_uppercase()
                             };
 
-                            let member = MemberData {
-                                name: u.username.into(),
-                                role: role_name.into(),
-                                avatar_text: initials.into(),
-                                avatar_color,
-                                status_color,
-                                status_text: u.status_text.unwrap_or_default().into(),
-                                is_bot,
+                            let avatar_path = if let Some(av) = &u.avatar {
+                                ensure_cached_avatar_as_png(BASE_URL, av).await
+                            } else {
+                                None
                             };
 
-                            if u.online {
-                                online_list.push(member);
-                            } else {
-                                offline_list.push(member);
-                            }
+                            processed_members.push(ProcessedMember {
+                                name: u.username,
+                                role: role_name,
+                                avatar_text: initials,
+                                avatar_color,
+                                avatar_path,
+                                status_color,
+                                status_text: u.status_text.unwrap_or_default(),
+                                is_bot,
+                                online: u.online,
+                            });
                         }
 
                         let window_weak = window_weak.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(window) = window_weak.upgrade() {
+                                let mut online_list: Vec<MemberData> = Vec::new();
+                                let mut offline_list: Vec<MemberData> = Vec::new();
+
+                                for pm in processed_members {
+                                    let (avatar_image, has_avatar) = if let Some(p) = &pm.avatar_path {
+                                        match slint::Image::load_from_path(p) {
+                                            Ok(img) => (img, true),
+                                            Err(_) => (slint::Image::default(), false),
+                                        }
+                                    } else {
+                                        (slint::Image::default(), false)
+                                    };
+
+                                    let member = MemberData {
+                                        name: pm.name.into(),
+                                        role: pm.role.into(),
+                                        avatar_text: pm.avatar_text.into(),
+                                        avatar_color: pm.avatar_color,
+                                        avatar_image,
+                                        has_avatar,
+                                        status_color: pm.status_color,
+                                        status_text: pm.status_text.into(),
+                                        is_bot: pm.is_bot,
+                                    };
+
+                                    if pm.online {
+                                        online_list.push(member);
+                                    } else {
+                                        offline_list.push(member);
+                                    }
+                                }
+
                                 window.set_online_members(Rc::new(VecModel::from(online_list)).into());
                                 window.set_offline_members(Rc::new(VecModel::from(offline_list)).into());
                             }
@@ -768,8 +848,14 @@ async fn start_socket_session(
                         if history.channel_code == cur_code {
                             log::info!("Nạp {} tin nhắn lịch sử cho channel {}", history.messages.len(), cur_code);
                             let mut processed = Vec::new();
+                            let mut prev_author: Option<String> = None;
                             for m in history.messages {
-                                processed.push(process_message(m, BASE_URL).await);
+                                let author = m.username.clone().unwrap_or_default();
+                                let is_grouped = prev_author.as_ref() == Some(&author) && !author.is_empty();
+                                prev_author = Some(author);
+                                let mut pm = process_message(m, BASE_URL, &user_avatars).await;
+                                pm.is_grouped = is_grouped;
+                                processed.push(pm);
                             }
                             let window_weak = window_weak.clone();
                             let _ = slint::invoke_from_event_loop(move || {
@@ -783,15 +869,20 @@ async fn start_socket_session(
                     HavenEvent::NewMessage(new_msg) => {
                         let cur_code = active_channel_code.lock().unwrap().clone();
                         if new_msg.channel_code == cur_code {
-                            let u = new_msg.message.username.as_deref().unwrap_or("Unknown");
+                            let u = new_msg.message.username.clone().unwrap_or_else(|| "Unknown".to_string());
                             let c = new_msg.message.content.as_deref().unwrap_or("");
                             log::info!("Tin nhắn mới từ [{}]: {}", u, c);
-                            let processed = process_message(new_msg.message, BASE_URL).await;
+                            let mut processed = process_message(new_msg.message, BASE_URL, &user_avatars).await;
                             let window_weak = window_weak.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(window) = window_weak.upgrade() {
-                                    let msg_data = to_slint_message(processed);
                                     let mut current_msgs: Vec<MessageData> = window.get_messages().iter().collect();
+                                    if let Some(last) = current_msgs.last() {
+                                        if last.author == u && !u.is_empty() {
+                                            processed.is_grouped = true;
+                                        }
+                                    }
+                                    let msg_data = to_slint_message(processed);
                                     current_msgs.push(msg_data);
                                     window.set_messages(Rc::new(VecModel::from(current_msgs)).into());
                                 }
@@ -883,11 +974,24 @@ fn parse_attachment_content(content: &str) -> (String, bool, bool, String, Strin
     (content.to_string(), false, false, String::new(), String::new())
 }
 
+struct ProcessedMember {
+    name: String,
+    role: String,
+    avatar_text: String,
+    avatar_color: Color,
+    avatar_path: Option<std::path::PathBuf>,
+    status_color: Color,
+    status_text: String,
+    is_bot: bool,
+    online: bool,
+}
+
 struct ProcessedMessage {
     id: String,
     author: String,
     avatar_text: String,
     avatar_color: Color,
+    local_avatar_path: Option<std::path::PathBuf>,
     timestamp: String,
     content: String,
     is_bot: bool,
@@ -896,6 +1000,53 @@ struct ProcessedMessage {
     attachment_name: String,
     is_image: bool,
     local_image_path: Option<std::path::PathBuf>,
+    is_grouped: bool,
+}
+
+async fn ensure_cached_avatar_as_png(base_url: &str, url: &str) -> Option<std::path::PathBuf> {
+    if url.trim().is_empty() {
+        return None;
+    }
+    let full_url = if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        format!("{}{}", base_url, url)
+    };
+
+    let clean_url = url.split('?').next().unwrap_or(url);
+    let raw_stem = Path::new(clean_url)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("avatar");
+    let safe_stem: String = raw_stem.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let file_stem = if safe_stem.is_empty() { "avatar" } else { &safe_stem };
+
+    let cache_dir = Path::new(".cache/avatars");
+    let local_png = cache_dir.join(format!("{}.png", file_stem));
+
+    if local_png.exists() && local_png.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        return Some(local_png);
+    }
+
+    let client = reqwest::Client::builder().danger_accept_invalid_certs(true).build().ok()?;
+    if let Ok(resp) = client.get(&full_url).send().await {
+        if resp.status().is_success() {
+            if let Ok(bytes) = resp.bytes().await {
+                let _ = tokio::fs::create_dir_all(cache_dir).await;
+                if let Ok(dyn_img) = image::load_from_memory(&bytes) {
+                    if dyn_img.save(&local_png).is_ok() {
+                        return Some(local_png);
+                    }
+                }
+                if tokio::fs::write(&local_png, &bytes).await.is_ok() {
+                    return Some(local_png);
+                }
+            }
+        }
+    }
+    None
 }
 
 async fn ensure_image_cached(base_url: &str, url: &str) -> Option<std::path::PathBuf> {
@@ -904,7 +1055,13 @@ async fn ensure_image_cached(base_url: &str, url: &str) -> Option<std::path::Pat
     } else {
         format!("{}{}", base_url, url)
     };
-    let file_name = Path::new(url).file_name()?.to_str()?;
+    let clean_url = url.split('?').next().unwrap_or(url);
+    let raw_name = Path::new(clean_url).file_name()?.to_str()?;
+    let safe_name: String = raw_name.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+        .collect();
+    let file_name = if safe_name.is_empty() { "image" } else { &safe_name };
+
     let cache_dir = Path::new(".cache/images");
     let local_path = cache_dir.join(file_name);
     if local_path.exists() && local_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
@@ -924,7 +1081,11 @@ async fn ensure_image_cached(base_url: &str, url: &str) -> Option<std::path::Pat
     None
 }
 
-async fn process_message(m: ChatMessageItem, base_url: &str) -> ProcessedMessage {
+async fn process_message(
+    m: ChatMessageItem,
+    base_url: &str,
+    user_avatars: &Arc<Mutex<HashMap<String, String>>>,
+) -> ProcessedMessage {
     let username = m.username.unwrap_or_else(|| "Unknown".to_string());
     let raw_content = m.content.unwrap_or_default();
     let created_at = m.created_at.unwrap_or_default();
@@ -950,6 +1111,17 @@ async fn process_message(m: ChatMessageItem, base_url: &str) -> ProcessedMessage
         created_at
     };
 
+    let avatar_url = m.avatar.or_else(|| {
+        let map = user_avatars.lock().unwrap();
+        map.get(&username).cloned()
+    });
+
+    let local_avatar_path = if let Some(av) = avatar_url {
+        ensure_cached_avatar_as_png(base_url, &av).await
+    } else {
+        None
+    };
+
     let local_image_path = if is_image && !attachment_url.is_empty() {
         ensure_image_cached(base_url, &attachment_url).await
     } else {
@@ -961,6 +1133,7 @@ async fn process_message(m: ChatMessageItem, base_url: &str) -> ProcessedMessage
         author: username,
         avatar_text: initials,
         avatar_color: color,
+        local_avatar_path,
         timestamp: time_str,
         content,
         is_bot,
@@ -969,10 +1142,23 @@ async fn process_message(m: ChatMessageItem, base_url: &str) -> ProcessedMessage
         attachment_name,
         is_image,
         local_image_path,
+        is_grouped: false,
     }
 }
 
 fn to_slint_message(pm: ProcessedMessage) -> MessageData {
+    let (avatar_image, has_avatar) = if let Some(path) = &pm.local_avatar_path {
+        match slint::Image::load_from_path(path) {
+            Ok(img) => (img, true),
+            Err(e) => {
+                log::warn!("Không thể giải mã avatar {:?}: {:?}", path, e);
+                (slint::Image::default(), false)
+            }
+        }
+    } else {
+        (slint::Image::default(), false)
+    };
+
     let (image_data, has_image) = if let Some(path) = &pm.local_image_path {
         match slint::Image::load_from_path(path) {
             Ok(img) => (img, true),
@@ -990,6 +1176,8 @@ fn to_slint_message(pm: ProcessedMessage) -> MessageData {
         author: pm.author.into(),
         avatar_text: pm.avatar_text.into(),
         avatar_color: pm.avatar_color,
+        avatar_image,
+        has_avatar,
         timestamp: pm.timestamp.into(),
         content: pm.content.into(),
         is_bot: pm.is_bot,
@@ -999,6 +1187,7 @@ fn to_slint_message(pm: ProcessedMessage) -> MessageData {
         is_image: pm.is_image,
         image_data,
         has_image,
+        is_grouped: pm.is_grouped,
     }
 }
 

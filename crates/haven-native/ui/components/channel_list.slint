@@ -31,6 +31,10 @@ export component ChannelList inherits Rectangle {
     in-out property <bool> is-muted: false;
     in-out property <bool> is-deafened: false;
     in-out property <string> current-username: "HavenUser";
+    in-out property <image> user-avatar-image;
+    in-out property <bool> has-user-avatar: false;
+    in-out property <string> user-avatar-text: "HU";
+    in-out property <color> user-avatar-color: Theme.blurple;
 
     callback channel-selected(string, bool);
     callback disconnect-voice();
@@ -246,6 +250,10 @@ export component ChannelList inherits Rectangle {
         // Discord User Profile Bar at bottom
         user-bar := UserBar {
             username <=> root.current-username;
+            avatar-image: root.user-avatar-image;
+            has-avatar: root.has-user-avatar;
+            avatar-text: root.user-avatar-text;
+            avatar-color: root.user-avatar-color;
             is-muted <=> root.is-muted;
             is-deafened <=> root.is-deafened;
             toggle-mute => { root.toggle-mute(); }

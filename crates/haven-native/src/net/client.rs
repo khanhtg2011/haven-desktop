@@ -1,4 +1,4 @@
-use crate::net::models::{ChannelItem, HavenEvent, MessageHistoryEvent, NewMessageEvent, OnlineUsersEvent};
+use crate::net::models::{ChannelItem, HavenEvent, MessageHistoryEvent, NewMessageEvent, OnlineUsersEvent, UserInfo};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -105,13 +105,25 @@ impl HavenSocketClient {
                                 }
 
                                 // Socket.IO event ("42[...]")
-                                if text.starts_with("42") {
-                                    if let Ok(event_val) = serde_json::from_str::<serde_json::Value>(&text[2..]) {
+                                if let Some(stripped) = text.strip_prefix("42") {
+                                    if let Ok(event_val) = serde_json::from_str::<serde_json::Value>(stripped) {
                                         if let Some(arr) = event_val.as_array() {
-                                            if let Some(event_name) = arr.get(0).and_then(|v| v.as_str()) {
+                                            if let Some(event_name) = arr.first().and_then(|v| v.as_str()) {
                                                 let payload = arr.get(1);
 
                                                 match event_name {
+                                                    "session-info" => {
+                                                        if let Some(p) = payload {
+                                                            match serde_json::from_value::<UserInfo>(p.clone()) {
+                                                                Ok(user) => {
+                                                                    let _ = event_tx.send(HavenEvent::SessionInfo(user));
+                                                                }
+                                                                Err(e) => {
+                                                                    log::error!("Deserialization error on session-info: {:?}", e);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                     "channels-list" => {
                                                         if let Some(p) = payload {
                                                             if let Ok(channels) = serde_json::from_value::<Vec<ChannelItem>>(p.clone()) {

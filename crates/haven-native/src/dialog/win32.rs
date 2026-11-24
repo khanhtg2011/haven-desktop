@@ -4,7 +4,7 @@ pub mod imp {
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, WPARAM};
 
     #[repr(C)]
-    #[allow(non_snake_case)]
+    #[allow(non_snake_case, clippy::upper_case_acronyms)]
     struct OPENFILENAMEW {
         lStructSize: u32,
         hwndOwner: HWND,

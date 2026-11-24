@@ -49,7 +49,7 @@ pub mod imp {
                     hInstance: hinstance,
                     hIcon: 0 as HICON,
                     hCursor: 0 as HCURSOR,
-                    hbrBackground: GetStockObject(BLACK_BRUSH as i32) as isize,
+                    hbrBackground: GetStockObject(BLACK_BRUSH) as isize,
                     lpszMenuName: std::ptr::null(),
                     lpszClassName: class_name.as_ptr(),
                     hIconSm: 0 as HICON,

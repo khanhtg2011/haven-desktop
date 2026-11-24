@@ -5,6 +5,8 @@ export struct MemberData {
     role: string,
     avatar-text: string,
     avatar-color: color,
+    avatar-image: image,
+    has-avatar: bool,
     status-color: color,
     status-text: string,
     is-bot: bool,
@@ -17,17 +19,52 @@ export component MembersSidebar inherits Rectangle {
     in-out property <[MemberData]> online-members: [];
     in-out property <[MemberData]> offline-members: [];
 
-    Flickable {
-        VerticalLayout {
-            padding-top: 16px;
-            padding-left: 12px;
-            padding-right: 12px;
-            spacing: 4px;
-            alignment: start;
+    VerticalLayout {
+        spacing: 0px;
+
+        Flickable {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                padding-top: 16px;
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-bottom: 16px;
+                spacing: 4px;
+                alignment: start;
+
+            // Search input
+            Rectangle {
+                height: 32px;
+                border-radius: 4px;
+                background: #1e1f22;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 8px;
+                    alignment: start;
+
+                    Text {
+                        text: "🔍";
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "Tìm kiếm thành viên...";
+                        color: Theme.text-muted;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Rectangle { height: 8px; }
 
             // Online Header
             Text {
-                text: "TRỰC TUYẾN — " + root.online-members.length;
+                text: "TRỰC TUYẾN (" + root.online-members.length + ")";
                 color: Theme.text-muted;
                 font-size: 11px;
                 font-weight: 700;
@@ -55,8 +92,16 @@ export component MembersSidebar inherits Rectangle {
                             height: 32px;
                             border-radius: 16px;
                             background: member.avatar-color;
+                            clip: true;
 
-                            Text {
+                            if member.has-avatar: Image {
+                                source: member.avatar-image;
+                                width: 100%;
+                                height: 100%;
+                                image-fit: cover;
+                            }
+
+                            if !member.has-avatar: Text {
                                 text: member.avatar-text;
                                 color: Theme.text-white;
                                 font-size: 12px;
@@ -129,7 +174,7 @@ export component MembersSidebar inherits Rectangle {
                 background: transparent;
                 Text {
                     y: 8px;
-                    text: "NGOÀI TUYẾN — " + root.offline-members.length;
+                    text: "NGOẠI TUYẾN (" + root.offline-members.length + ")";
                     color: Theme.text-muted;
                     font-size: 11px;
                     font-weight: 700;
@@ -158,8 +203,16 @@ export component MembersSidebar inherits Rectangle {
                             height: 32px;
                             border-radius: 16px;
                             background: #4e5058;
+                            clip: true;
 
-                            Text {
+                            if member.has-avatar: Image {
+                                source: member.avatar-image;
+                                width: 100%;
+                                height: 100%;
+                                image-fit: cover;
+                            }
+
+                            if !member.has-avatar: Text {
                                 text: member.avatar-text;
                                 color: Theme.text-muted;
                                 font-size: 12px;
@@ -202,6 +255,48 @@ export component MembersSidebar inherits Rectangle {
                 }
 
                 off-touch := TouchArea {}
+            }
+        }
+    }
+
+        // Bottom Action Bar
+        Rectangle {
+            height: 52px;
+            background: #232428;
+
+            VerticalLayout {
+                alignment: center;
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 4px;
+
+                Rectangle {
+                    height: 28px;
+                    border-radius: 4px;
+                    background: btn-invite.has-hover ? #2e3035 : transparent;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        spacing: 8px;
+                        alignment: start;
+
+                        Text {
+                            text: "👥";
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "Mời người dùng";
+                            color: Theme.text-white;
+                            font-size: 13px;
+                            font-weight: 500;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    btn-invite := TouchArea {}
+                }
             }
         }
     }

@@ -25,6 +25,10 @@ export component MainWindow inherits Window {
     in-out property <string> active-guild: "haven-main";
 
     in-out property <string> current-username: "HavenUser";
+    in-out property <image> current-user-avatar;
+    in-out property <bool> has-current-user-avatar: false;
+    in-out property <string> current-user-avatar-text: "HU";
+    in-out property <color> current-user-avatar-color: Theme.blurple;
     in-out property <string> server-name: "Haven Official";
     in-out property <string> channel-topic: "Kênh thảo luận cộng đồng Haven - 100% Native Rust Client";
     in-out property <[ChannelItemData]> text-channels: [];
@@ -57,58 +61,157 @@ export component MainWindow inherits Window {
         }
     }
 
-    if root.is-logged-in: HorizontalLayout {
+    if root.is-logged-in: VerticalLayout {
         spacing: 0px;
 
-        // 1. Guilds Sidebar (72px)
-        guild-sidebar := GuildSidebar {
-            guild-selected(id) => {
-                root.active-guild = id;
-                root.guild-selected(id);
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: 0px;
+
+            // 1. Guilds Sidebar (72px)
+            guild-sidebar := GuildSidebar {
+                guild-selected(id) => {
+                    root.active-guild = id;
+                    root.guild-selected(id);
+                }
+            }
+
+            // 2. Channels List & User Bar (240px)
+            channel-list := ChannelList {
+                server-name: root.server-name;
+                current-username: root.current-username;
+                user-avatar-image: root.current-user-avatar;
+                has-user-avatar: root.has-current-user-avatar;
+                user-avatar-text: root.current-user-avatar-text;
+                user-avatar-color: root.current-user-avatar-color;
+                text-channels: root.text-channels;
+                voice-channels: root.voice-channels;
+                is-muted: root.is-muted;
+                is-deafened: root.is-deafened;
+                is-voice-connected: root.is-voice-connected;
+                active-voice-channel: root.active-voice-channel;
+                voice-ping-ms: root.voice-ping-ms;
+                open-settings => { root.open-settings(); }
+                toggle-mute => { root.toggle-mute(); }
+                toggle-deafen => { root.toggle-deafen(); }
+                disconnect-voice => { root.disconnect-voice(); }
+                channel-selected(id, is-voice) => {
+                    root.active-channel-code = id;
+                    root.channel-selected(id, is-voice);
+                }
+            }
+
+            // 3. Main Chat Viewport
+            chat-area := ChatArea {
+                channel-name: root.active-channel-name;
+                channel-topic: root.channel-topic;
+                messages: root.messages;
+                send-message(text) => {
+                    root.send-message(text);
+                }
+                pick-attachment => {
+                    root.pick-attachment();
+                }
+                open-attachment(url) => {
+                    root.open-attachment(url);
+                }
+            }
+
+            // 4. Right Members Sidebar (240px)
+            members-sidebar := MembersSidebar {
+                online-members: root.online-members;
+                offline-members: root.offline-members;
             }
         }
 
-        // 2. Channels List & User Bar (240px)
-        channel-list := ChannelList {
-            server-name: root.server-name;
-            current-username: root.current-username;
-            text-channels: root.text-channels;
-            voice-channels: root.voice-channels;
-            is-muted: root.is-muted;
-            is-deafened: root.is-deafened;
-            is-voice-connected: root.is-voice-connected;
-            active-voice-channel: root.active-voice-channel;
-            voice-ping-ms: root.voice-ping-ms;
-            open-settings => { root.open-settings(); }
-            toggle-mute => { root.toggle-mute(); }
-            toggle-deafen => { root.toggle-deafen(); }
-            disconnect-voice => { root.disconnect-voice(); }
-            channel-selected(id, is-voice) => {
-                root.active-channel-code = id;
-                root.channel-selected(id, is-voice);
-            }
-        }
+        // 5. Bottom Status Bar (Matching Haven Parity)
+        Rectangle {
+            height: 24px;
+            background: #111214;
 
-        // 3. Main Chat Viewport
-        chat-area := ChatArea {
-            channel-name: root.active-channel-name;
-            channel-topic: root.channel-topic;
-            messages: root.messages;
-            send-message(text) => {
-                root.send-message(text);
-            }
-            pick-attachment => {
-                root.pick-attachment();
-            }
-            open-attachment(url) => {
-                root.open-attachment(url);
-            }
-        }
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 12px;
+                alignment: space-between;
 
-        // 4. Right Members Sidebar (240px)
-        members-sidebar := MembersSidebar {
-            online-members: root.online-members;
-            offline-members: root.offline-members;
+                // Left stats
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: start;
+
+                    Rectangle {
+                        y: 7px;
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: #23a55a;
+                    }
+
+                    Text {
+                        text: "SERVER ĐÃ KẾT NỐI";
+                        color: #23a55a;
+                        font-size: 10px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "•";
+                        color: #4e5058;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "PING " + root.voice-ping-ms + " MS";
+                        color: #949ba4;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "•";
+                        color: #4e5058;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "CHANNEL #" + root.active-channel-name;
+                        color: #949ba4;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "•";
+                        color: #4e5058;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: "ONLINE " + root.online-members.length;
+                        color: #949ba4;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // Right stats
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+
+                    Text {
+                        text: "v0.7.0";
+                        color: #5c5f66;
+                        font-size: 10px;
+                        vertical-alignment: center;
+                    }
+                }
+            }
         }
     }
 }

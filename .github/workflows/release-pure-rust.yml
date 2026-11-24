@@ -64,13 +64,18 @@ jobs:
           tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
           body: |
             ## 🚧 Haven Pure Rust Native - Pre-Release Build
-            * **Lưu ý:** Bản thử nghiệm đánh giá (Pre-release). Bản phát hành chính thức sẽ chỉ được tung ra sau khi có sự kiểm duyệt và phê duyệt hoàn chỉnh từ người dùng.
-            * **Đặc tính:** 100% Rust Native (Zero Chromium / Zero WebView2), RAM ~46MB, khởi động <50ms.
+            * **Lưu ý:** Toàn bộ ứng dụng được release dưới dạng Thử nghiệm (Pre-release). Bản phát hành chính thức sẽ chỉ được xuất bản sau khi người dùng phê duyệt hoàn thành đầy đủ.
+            * **Đặc tính:** 100% Pure Rust Native Client (Zero Chromium / Zero WebView2), hiệu năng cực cao, RAM ~36MB.
             * **Tính năng:**
+              - Hiển thị đầy đủ Avatar người dùng (hỗ trợ GIF/WebP/PNG/JPG) trên thanh User profile, tin nhắn chat và danh sách thành viên
+              - Gom nhóm tin nhắn kiểu Discord/Haven (Message grouping)
+              - Danh sách thành viên bên phải: Tìm kiếm, Trực tuyến, Ngoại tuyến, Bot badges, Status text
+              - Thanh trạng thái Server kết nối, Ping, Channel và Online counter
               - System Tray & Hotkey PTT CapsLock
-              - Gửi & xem ảnh / tệp đính kèm
-              - WebRTC Voice Room Signaling & Audio Engine
+              - Gửi & xem ảnh / tệp đính kèm trực tiếp
+              - WebRTC Voice Room Signaling & WASAPI Audio Engine
               - In-game Click-through HUD Overlay
+              - Bảo mật: Vượt qua Cargo Audit (0 lỗ hổng bảo mật, vá ringbuf 0.5.3, chống Path Traversal)
           prerelease: true
           draft: false
           files: |

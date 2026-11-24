@@ -5,6 +5,8 @@ export struct MessageData {
     author: string,
     avatar-text: string,
     avatar-color: color,
+    avatar-image: image,
+    has-avatar: bool,
     timestamp: string,
     content: string,
     is-bot: bool,
@@ -14,6 +16,7 @@ export struct MessageData {
     is-image: bool,
     image-data: image,
     has-image: bool,
+    is-grouped: bool,
 }
 
 export component ChatArea inherits Rectangle {
@@ -129,11 +132,19 @@ export component ChatArea inherits Rectangle {
                         // Avatar
                         Rectangle {
                             width: 40px;
-                            height: 40px;
+                            height: msg.is-grouped ? 0px : 40px;
                             border-radius: 20px;
-                            background: msg.avatar-color;
+                            background: msg.is-grouped ? transparent : msg.avatar-color;
+                            clip: true;
 
-                            Text {
+                            if !msg.is-grouped && msg.has-avatar: Image {
+                                source: msg.avatar-image;
+                                width: 100%;
+                                height: 100%;
+                                image-fit: cover;
+                            }
+
+                            if !msg.is-grouped && !msg.has-avatar: Text {
                                 text: msg.avatar-text;
                                 color: Theme.text-white;
                                 font-size: 14px;
@@ -145,11 +156,11 @@ export component ChatArea inherits Rectangle {
 
                         // Message Content Details
                         VerticalLayout {
-                            spacing: 4px;
+                            spacing: msg.is-grouped ? 1px : 4px;
                             alignment: start;
 
                             // Author & Timestamp Row
-                            HorizontalLayout {
+                            if !msg.is-grouped: HorizontalLayout {
                                 spacing: 8px;
                                 alignment: start;
 

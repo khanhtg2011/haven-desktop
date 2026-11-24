@@ -6,6 +6,10 @@ export component UserBar inherits Rectangle {
 
     in-out property <string> username: "HavenUser";
     in-out property <string> user-tag: "Online";
+    in-out property <image> avatar-image;
+    in-out property <bool> has-avatar: false;
+    in-out property <string> avatar-text: "HU";
+    in-out property <color> avatar-color: Theme.blurple;
     in-out property <bool> is-muted: false;
     in-out property <bool> is-deafened: false;
 
@@ -40,11 +44,21 @@ export component UserBar inherits Rectangle {
                         width: 32px;
                         height: 32px;
                         border-radius: 16px;
-                        background: Theme.blurple;
+                        background: root.avatar-color;
+                        clip: true;
 
-                        Text {
-                            text: "👤";
-                            font-size: 16px;
+                        if root.has-avatar: Image {
+                            source: root.avatar-image;
+                            width: 100%;
+                            height: 100%;
+                            image-fit: cover;
+                        }
+
+                        if !root.has-avatar: Text {
+                            text: root.avatar-text;
+                            color: Theme.text-white;
+                            font-size: 13px;
+                            font-weight: 700;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
