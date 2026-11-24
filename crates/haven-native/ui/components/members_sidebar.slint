@@ -18,6 +18,10 @@ export component MembersSidebar inherits Rectangle {
 
     in-out property <[MemberData]> online-members: [];
     in-out property <[MemberData]> offline-members: [];
+    in-out property <bool> is-voice-connected: false;
+    in-out property <string> active-voice-channel: "";
+
+    callback toggle-voice();
 
     VerticalLayout {
         spacing: 0px;
@@ -32,6 +36,54 @@ export component MembersSidebar inherits Rectangle {
                 padding-bottom: 16px;
                 spacing: 4px;
                 alignment: start;
+
+                // Voice Section matching Haven Web / Image 1
+                VerticalLayout {
+                    spacing: 4px;
+                    padding-bottom: 8px;
+
+                    Text {
+                        text: "▾ GIỌNG NÓI";
+                        color: Theme.text-muted;
+                        font-size: 11px;
+                        font-weight: 700;
+                    }
+
+                    Rectangle {
+                        height: 32px;
+                        border-radius: 4px;
+                        background: root.is-voice-connected ? #248046 : (voice-side-touch.has-hover ? #35373c : #2b2d31);
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 8px;
+                            alignment: start;
+
+                            Text {
+                                text: root.is-voice-connected ? "●" : "🎧";
+                                color: root.is-voice-connected ? #57f287 : Theme.text-white;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: root.is-voice-connected ? (root.active-voice-channel != "" ? root.active-voice-channel : "Voice đã kết nối") : "Tham gia Voice";
+                                color: Theme.text-white;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+
+                        voice-side-touch := TouchArea {
+                            clicked => { root.toggle-voice(); }
+                        }
+                    }
+                }
+
+                Rectangle { height: 4px; }
 
             // Search input
             Rectangle {

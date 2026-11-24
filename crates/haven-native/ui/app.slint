@@ -25,6 +25,7 @@ export component MainWindow inherits Window {
     in-out property <string> active-guild: "haven-main";
 
     in-out property <string> current-username: "HavenUser";
+    in-out property <string> user-status: "Online";
     in-out property <image> current-user-avatar;
     in-out property <bool> has-current-user-avatar: false;
     in-out property <string> current-user-avatar-text: "HU";
@@ -46,6 +47,7 @@ export component MainWindow inherits Window {
     callback send-message(string);
     callback channel-selected(string, bool);
     callback disconnect-voice();
+    callback toggle-voice();
     callback pick-attachment();
     callback open-attachment(string);
     callback guild-selected(string);
@@ -80,12 +82,14 @@ export component MainWindow inherits Window {
             channel-list := ChannelList {
                 server-name: root.server-name;
                 current-username: root.current-username;
+                user-status: root.user-status;
                 user-avatar-image: root.current-user-avatar;
                 has-user-avatar: root.has-current-user-avatar;
                 user-avatar-text: root.current-user-avatar-text;
                 user-avatar-color: root.current-user-avatar-color;
                 text-channels: root.text-channels;
                 voice-channels: root.voice-channels;
+                active-channel-id <=> root.active-channel-code;
                 is-muted: root.is-muted;
                 is-deafened: root.is-deafened;
                 is-voice-connected: root.is-voice-connected;
@@ -106,6 +110,8 @@ export component MainWindow inherits Window {
                 channel-name: root.active-channel-name;
                 channel-topic: root.channel-topic;
                 messages: root.messages;
+                is-voice-connected: root.is-voice-connected;
+                toggle-voice => { root.toggle-voice(); }
                 send-message(text) => {
                     root.send-message(text);
                 }
@@ -121,6 +127,9 @@ export component MainWindow inherits Window {
             members-sidebar := MembersSidebar {
                 online-members: root.online-members;
                 offline-members: root.offline-members;
+                is-voice-connected: root.is-voice-connected;
+                active-voice-channel: root.active-voice-channel;
+                toggle-voice => { root.toggle-voice(); }
             }
         }
 

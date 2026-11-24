@@ -25,6 +25,9 @@ export component ChannelList inherits Rectangle {
         { id: "music-room", name: "Music Bot Lounge", is-voice: true, is-selected: false, unread: false },
     ];
 
+    in-out property <string> active-channel-id: "";
+    in-out property <string> active-voice-id: "";
+    in-out property <string> user-status: "Online";
     in-out property <bool> is-voice-connected: false;
     in-out property <string> active-voice-channel: "";
     in-out property <int> voice-ping-ms: 18;
@@ -103,7 +106,8 @@ export component ChannelList inherits Rectangle {
                 for ch in text-channels: Rectangle {
                     height: 34px;
                     border-radius: 4px;
-                    background: ch.is-selected ? Theme.bg-active : (ch-touch.has-hover ? Theme.bg-hover : transparent);
+                    property <bool> is-active: (ch.id == root.active-channel-id) || (root.active-channel-id == "" && ch.is-selected);
+                    background: is-active ? Theme.bg-active : (ch-touch.has-hover ? Theme.bg-hover : transparent);
 
                     HorizontalLayout {
                         padding-left: 10px;
@@ -113,7 +117,7 @@ export component ChannelList inherits Rectangle {
 
                         Text {
                             text: "#";
-                            color: ch.is-selected ? Theme.text-white : Theme.text-muted;
+                            color: is-active ? Theme.text-white : Theme.text-muted;
                             font-size: 18px;
                             font-weight: 500;
                             vertical-alignment: center;
@@ -121,15 +125,18 @@ export component ChannelList inherits Rectangle {
 
                         Text {
                             text: ch.name;
-                            color: ch.is-selected ? Theme.text-white : (ch.unread ? Theme.text-white : Theme.text-normal);
+                            color: is-active ? Theme.text-white : (ch.unread ? Theme.text-white : Theme.text-normal);
                             font-size: 14px;
-                            font-weight: ch.unread || ch.is-selected ? 600 : 400;
+                            font-weight: is-active || ch.unread ? 600 : 400;
                             vertical-alignment: center;
                         }
                     }
 
                     ch-touch := TouchArea {
-                        clicked => { root.channel-selected(ch.id, false); }
+                        clicked => {
+                            root.active-channel-id = ch.id;
+                            root.channel-selected(ch.id, false);
+                        }
                     }
                 }
 
@@ -149,7 +156,8 @@ export component ChannelList inherits Rectangle {
                 for ch in voice-channels: Rectangle {
                     height: 34px;
                     border-radius: 4px;
-                    background: ch.is-selected ? Theme.bg-active : (vch-touch.has-hover ? Theme.bg-hover : transparent);
+                    property <bool> is-active: (ch.id == root.active-voice-id);
+                    background: is-active ? Theme.bg-active : (vch-touch.has-hover ? Theme.bg-hover : transparent);
 
                     HorizontalLayout {
                         padding-left: 10px;
@@ -165,15 +173,18 @@ export component ChannelList inherits Rectangle {
 
                         Text {
                             text: ch.name;
-                            color: ch.is-selected ? Theme.text-white : Theme.text-normal;
+                            color: is-active ? Theme.text-white : Theme.text-normal;
                             font-size: 14px;
-                            font-weight: ch.is-selected ? 600 : 400;
+                            font-weight: is-active ? 600 : 400;
                             vertical-alignment: center;
                         }
                     }
 
                     vch-touch := TouchArea {
-                        clicked => { root.channel-selected(ch.id, true); }
+                        clicked => {
+                            root.active-voice-id = ch.id;
+                            root.channel-selected(ch.id, true);
+                        }
                     }
                 }
             }
@@ -250,6 +261,7 @@ export component ChannelList inherits Rectangle {
         // Discord User Profile Bar at bottom
         user-bar := UserBar {
             username <=> root.current-username;
+            user-status: root.user-status;
             avatar-image: root.user-avatar-image;
             has-avatar: root.has-user-avatar;
             avatar-text: root.user-avatar-text;

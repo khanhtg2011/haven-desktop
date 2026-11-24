@@ -5,7 +5,7 @@ export component UserBar inherits Rectangle {
     background: Theme.bg-user-bar;
 
     in-out property <string> username: "HavenUser";
-    in-out property <string> user-tag: "Online";
+    in-out property <string> user-status: "Online";
     in-out property <image> avatar-image;
     in-out property <bool> has-avatar: false;
     in-out property <string> avatar-text: "HU";
@@ -92,7 +92,7 @@ export component UserBar inherits Rectangle {
                     }
 
                     Text {
-                        text: root.user-tag;
+                        text: root.user-status;
                         color: Theme.text-muted;
                         font-size: 11px;
                         overflow: elide;

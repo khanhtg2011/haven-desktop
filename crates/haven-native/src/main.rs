@@ -63,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_token = Arc::new(Mutex::new(String::new()));
     let api_client = Arc::new(HavenApiClient::new(BASE_URL));
     let user_avatars = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+    let cache_mgr = Arc::new(CacheManager::new(BASE_URL.to_string()));
 
     // 0. Khởi tạo Native Audio Engine (WASAPI + Lock-Free Ringbuffer)
     let audio_engine = match AudioEngine::new() {
@@ -365,6 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let channels_cache = channels_cache.clone();
         let current_token = current_token.clone();
         let user_avatars = user_avatars.clone();
+        let cache_mgr = cache_mgr.clone();
 
         main_window.on_do_login(move |username, password| {
             let u = username.to_string();
@@ -377,6 +379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let channels_cache = channels_cache.clone();
             let current_token = current_token.clone();
             let user_avatars = user_avatars.clone();
+            let cache_mgr = cache_mgr.clone();
 
             log::info!("Nhận yêu cầu đăng nhập từ tài khoản: {}", u);
 
@@ -408,6 +411,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             active_voice_code,
                             channels_cache,
                             user_avatars,
+                            cache_mgr,
                         ).await;
                     }
                     Err(e) => {
@@ -425,19 +429,110 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Callback khi gửi tin nhắn từ Slint UI
+    // Callback khi gửi tin nhắn từ Slint UI (Tức thì 0ms Optimistic UI)
     {
         let socket_client_holder = socket_client_holder.clone();
         let active_channel_code = active_channel_code.clone();
-        main_window.on_send_message(move |msg_text| {
-            let text = msg_text.to_string();
-            let code = active_channel_code.lock().unwrap().clone();
-            log::info!("Gửi tin nhắn tới channel [{}]: {}", code, text);
+        let window_weak = main_window.as_weak();
 
+        main_window.on_send_message(move |msg_text| {
+            let text = msg_text.trim().to_string();
+            if text.is_empty() {
+                return;
+            }
+            let code = active_channel_code.lock().unwrap().clone();
+            log::info!("Gửi tin nhắn tức thì (Optimistic 0ms) tới channel [{}]: {}", code, text);
+
+            // 1. Gửi qua WebSocket
             let holder = socket_client_holder.lock().unwrap();
             if let Some(client) = holder.as_ref() {
                 if !code.is_empty() {
                     client.send_message(&code, &text);
+                }
+            }
+
+            // 2. Hiển thị ngay lập tức trên UI (0ms delay)
+            if let Some(window) = window_weak.upgrade() {
+                let cur_user = window.get_current_username().to_string();
+                let cur_av_text = window.get_current_user_avatar_text().to_string();
+                let cur_av_color = window.get_current_user_avatar_color();
+                let has_av = window.get_has_current_user_avatar();
+                let cur_av_img = window.get_current_user_avatar();
+
+                let now = chrono::Local::now();
+                let time_str = now.format("%H:%M").to_string();
+
+                let mut current_msgs: Vec<MessageData> = window.get_messages().iter().collect();
+                let is_grouped = if let Some(last) = current_msgs.last() {
+                    last.author == cur_user && !cur_user.is_empty()
+                } else {
+                    false
+                };
+
+                let opt_msg = MessageData {
+                    id: format!("opt-{}", now.timestamp_millis()).into(),
+                    author: cur_user.into(),
+                    avatar_text: cur_av_text.into(),
+                    avatar_color: cur_av_color,
+                    avatar_image: cur_av_img,
+                    has_avatar: has_av,
+                    timestamp: time_str.into(),
+                    content: text.into(),
+                    is_bot: false,
+                    is_attachment: false,
+                    attachment_url: "".into(),
+                    attachment_name: "".into(),
+                    is_image: false,
+                    image_data: slint::Image::default(),
+                    has_image: false,
+                    is_grouped,
+                };
+
+                current_msgs.push(opt_msg);
+                window.set_messages(Rc::new(VecModel::from(current_msgs)).into());
+            }
+        });
+    }
+
+    // Callback toggle voice (từ top bar hoặc sidebar)
+    {
+        let socket_client_holder = socket_client_holder.clone();
+        let active_voice_code = active_voice_code.clone();
+        let active_channel_code = active_channel_code.clone();
+        let channels_cache = channels_cache.clone();
+        let window_weak = main_window.as_weak();
+
+        main_window.on_toggle_voice(move || {
+            if let Some(window) = window_weak.upgrade() {
+                let is_connected = window.get_is_voice_connected();
+                let holder = socket_client_holder.lock().unwrap();
+
+                if is_connected {
+                    let code = active_voice_code.lock().unwrap().clone();
+                    log::info!("Toggle Voice: Ngắt kết nối phòng thoại [{}]", code);
+                    if let Some(client) = holder.as_ref() {
+                        if !code.is_empty() {
+                            client.leave_voice(&code);
+                        }
+                    }
+                    *active_voice_code.lock().unwrap() = String::new();
+                    window.set_is_voice_connected(false);
+                    window.set_active_voice_channel("".into());
+                } else {
+                    let code = active_channel_code.lock().unwrap().clone();
+                    log::info!("Toggle Voice: Tham gia phòng thoại [{}]", code);
+                    if let Some(client) = holder.as_ref() {
+                        if !code.is_empty() {
+                            client.join_voice(&code);
+                        }
+                    }
+                    *active_voice_code.lock().unwrap() = code.clone();
+                    let ch_name = {
+                        let cache = channels_cache.lock().unwrap();
+                        cache.iter().find(|c| c.code == code).map(|c| c.name.clone()).unwrap_or(code)
+                    };
+                    window.set_is_voice_connected(true);
+                    window.set_active_voice_channel(ch_name.into());
                 }
             }
         });
@@ -544,8 +639,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if let Some((name, topic)) = ch_name {
                     let window_weak = window_weak.clone();
+                    let code_clone = code.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(window) = window_weak.upgrade() {
+                            window.set_active_channel_code(code_clone.into());
                             window.set_active_channel_name(name.into());
                             window.set_channel_topic(topic.into());
                         }
@@ -605,6 +702,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let active_voice_code = active_voice_code.clone();
                 let channels_cache = channels_cache.clone();
                 let user_avatars = user_avatars.clone();
+                let cache_mgr = cache_mgr.clone();
 
                 tokio::spawn(async move {
                     start_socket_session(
@@ -616,6 +714,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         active_voice_code,
                         channels_cache,
                         user_avatars,
+                        cache_mgr,
                     ).await;
                 });
             }
@@ -637,6 +736,7 @@ async fn start_socket_session(
     active_voice_code: Arc<Mutex<String>>,
     channels_cache: Arc<Mutex<Vec<ChannelItem>>>,
     user_avatars: Arc<Mutex<HashMap<String, String>>>,
+    cache_mgr: Arc<CacheManager>,
 ) {
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<HavenEvent>();
 
@@ -668,11 +768,8 @@ async fn start_socket_session(
                             user_avatars.lock().unwrap().insert(user_info.username.clone(), av.clone());
                         }
 
-                        let avatar_path = if let Some(av) = &user_info.avatar {
-                            ensure_cached_avatar_as_png(BASE_URL, av).await
-                        } else {
-                            None
-                        };
+                        let avatar_path = user_info.avatar.as_deref().and_then(|av| cache_mgr.get_avatar_fast(av));
+                        let status_text = user_info.status_text.as_deref().unwrap_or("Online").to_string();
 
                         let u_name = user_info.username.clone();
                         let initials = if u_name.len() >= 2 {
@@ -685,6 +782,7 @@ async fn start_socket_session(
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(window) = window_weak.upgrade() {
                                 window.set_current_username(u_name.into());
+                                window.set_user_status(status_text.into());
                                 window.set_current_user_avatar_text(initials.into());
                                 if let Some(path) = avatar_path {
                                     if let Ok(img) = slint::Image::load_from_path(&path) {
@@ -734,11 +832,13 @@ async fn start_socket_session(
                         }
 
                         let window_weak = window_weak.clone();
+                        let first_code_clone = first_text_code.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(window) = window_weak.upgrade() {
                                 window.set_text_channels(Rc::new(VecModel::from(text_items)).into());
                                 window.set_voice_channels(Rc::new(VecModel::from(voice_items)).into());
                                 if !first_text_name.is_empty() {
+                                    window.set_active_channel_code(first_code_clone.into());
                                     window.set_active_channel_name(first_text_name.into());
                                     window.set_channel_topic(first_text_topic.into());
                                 }
@@ -784,11 +884,8 @@ async fn start_socket_session(
                                 u.username.to_uppercase()
                             };
 
-                            let avatar_path = if let Some(av) = &u.avatar {
-                                ensure_cached_avatar_as_png(BASE_URL, av).await
-                            } else {
-                                None
-                            };
+                            // Fast non-blocking avatar lookup (0ms)
+                            let avatar_path = u.avatar.as_deref().and_then(|av| cache_mgr.get_avatar_fast(av));
 
                             processed_members.push(ProcessedMember {
                                 name: u.username,
@@ -846,14 +943,14 @@ async fn start_socket_session(
                     HavenEvent::MessageHistory(history) => {
                         let cur_code = active_channel_code.lock().unwrap().clone();
                         if history.channel_code == cur_code {
-                            log::info!("Nạp {} tin nhắn lịch sử cho channel {}", history.messages.len(), cur_code);
+                            log::info!("Nạp {} tin nhắn lịch sử (0ms) cho channel {}", history.messages.len(), cur_code);
                             let mut processed = Vec::new();
                             let mut prev_author: Option<String> = None;
                             for m in history.messages {
                                 let author = m.username.clone().unwrap_or_default();
                                 let is_grouped = prev_author.as_ref() == Some(&author) && !author.is_empty();
                                 prev_author = Some(author);
-                                let mut pm = process_message(m, BASE_URL, &user_avatars).await;
+                                let mut pm = process_message(m, &cache_mgr, &user_avatars);
                                 pm.is_grouped = is_grouped;
                                 processed.push(pm);
                             }
@@ -870,13 +967,26 @@ async fn start_socket_session(
                         let cur_code = active_channel_code.lock().unwrap().clone();
                         if new_msg.channel_code == cur_code {
                             let u = new_msg.message.username.clone().unwrap_or_else(|| "Unknown".to_string());
-                            let c = new_msg.message.content.as_deref().unwrap_or("");
+                            let c = new_msg.message.content.clone().unwrap_or_default();
                             log::info!("Tin nhắn mới từ [{}]: {}", u, c);
-                            let mut processed = process_message(new_msg.message, BASE_URL, &user_avatars).await;
+                            let mut processed = process_message(new_msg.message, &cache_mgr, &user_avatars);
                             let window_weak = window_weak.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(window) = window_weak.upgrade() {
+                                    let cur_user = window.get_current_username().to_string();
                                     let mut current_msgs: Vec<MessageData> = window.get_messages().iter().collect();
+
+                                    // Deduplicate optimistic message
+                                    if u == cur_user {
+                                        if let Some(last) = current_msgs.last_mut() {
+                                            if last.id.starts_with("opt-") && last.content == c {
+                                                last.id = processed.id.into();
+                                                window.set_messages(Rc::new(VecModel::from(current_msgs)).into());
+                                                return;
+                                            }
+                                        }
+                                    }
+
                                     if let Some(last) = current_msgs.last() {
                                         if last.author == u && !u.is_empty() {
                                             processed.is_grouped = true;
@@ -1003,87 +1113,160 @@ struct ProcessedMessage {
     is_grouped: bool,
 }
 
-async fn ensure_cached_avatar_as_png(base_url: &str, url: &str) -> Option<std::path::PathBuf> {
-    if url.trim().is_empty() {
-        return None;
-    }
-    let full_url = if url.starts_with("http://") || url.starts_with("https://") {
-        url.to_string()
-    } else {
-        format!("{}{}", base_url, url)
-    };
+pub struct CacheManager {
+    base_url: String,
+    http_client: reqwest::Client,
+    avatar_cache: Arc<Mutex<HashMap<String, std::path::PathBuf>>>,
+    image_cache: Arc<Mutex<HashMap<String, std::path::PathBuf>>>,
+}
 
-    let clean_url = url.split('?').next().unwrap_or(url);
-    let raw_stem = Path::new(clean_url)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("avatar");
-    let safe_stem: String = raw_stem.chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    let file_stem = if safe_stem.is_empty() { "avatar" } else { &safe_stem };
-
-    let cache_dir = Path::new(".cache/avatars");
-    let local_png = cache_dir.join(format!("{}.png", file_stem));
-
-    if local_png.exists() && local_png.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-        return Some(local_png);
+impl CacheManager {
+    pub fn new(base_url: String) -> Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap_or_default();
+        Self {
+            base_url,
+            http_client,
+            avatar_cache: Arc::new(Mutex::new(HashMap::new())),
+            image_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
-    let client = reqwest::Client::builder().danger_accept_invalid_certs(true).build().ok()?;
-    if let Ok(resp) = client.get(&full_url).send().await {
-        if resp.status().is_success() {
-            if let Ok(bytes) = resp.bytes().await {
-                let _ = tokio::fs::create_dir_all(cache_dir).await;
-                if let Ok(dyn_img) = image::load_from_memory(&bytes) {
-                    if dyn_img.save(&local_png).is_ok() {
-                        return Some(local_png);
+    pub fn get_avatar_fast(&self, url: &str) -> Option<std::path::PathBuf> {
+        let trimmed = url.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        // 1. Fast in-memory check (0 nanoseconds)
+        {
+            let map = self.avatar_cache.lock().unwrap();
+            if let Some(path) = map.get(trimmed) {
+                if path.exists() {
+                    return Some(path.clone());
+                }
+            }
+        }
+
+        // 2. Fast filesystem check (<0.1ms)
+        let clean_url = trimmed.split('?').next().unwrap_or(trimmed);
+        let raw_stem = Path::new(clean_url)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("avatar");
+        let safe_stem: String = raw_stem.chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        let file_stem = if safe_stem.is_empty() { "avatar" } else { &safe_stem };
+
+        let cache_dir = Path::new(".cache/avatars");
+        let local_png = cache_dir.join(format!("{}.png", file_stem));
+
+        if local_png.exists() && local_png.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+            self.avatar_cache.lock().unwrap().insert(trimmed.to_string(), local_png.clone());
+            return Some(local_png);
+        }
+
+        // 3. Spawn background non-blocking download (NEVER BLOCK EVENT LOOP!)
+        let full_url = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            trimmed.to_string()
+        } else {
+            format!("{}{}", self.base_url, trimmed)
+        };
+        let client = self.http_client.clone();
+        let cache_map = self.avatar_cache.clone();
+        let url_key = trimmed.to_string();
+
+        tokio::spawn(async move {
+            if let Ok(resp) = client.get(&full_url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(bytes) = resp.bytes().await {
+                        let _ = tokio::fs::create_dir_all(cache_dir).await;
+                        let mut saved = false;
+                        if let Ok(dyn_img) = image::load_from_memory(&bytes) {
+                            if dyn_img.save(&local_png).is_ok() {
+                                saved = true;
+                            }
+                        }
+                        if !saved {
+                            let _ = tokio::fs::write(&local_png, &bytes).await;
+                        }
+                        if local_png.exists() {
+                            cache_map.lock().unwrap().insert(url_key, local_png);
+                        }
                     }
                 }
-                if tokio::fs::write(&local_png, &bytes).await.is_ok() {
-                    return Some(local_png);
+            }
+        });
+
+        None
+    }
+
+    pub fn get_image_fast(&self, url: &str) -> Option<std::path::PathBuf> {
+        let trimmed = url.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        // 1. Fast in-memory check
+        {
+            let map = self.image_cache.lock().unwrap();
+            if let Some(path) = map.get(trimmed) {
+                if path.exists() {
+                    return Some(path.clone());
                 }
             }
         }
-    }
-    None
-}
 
-async fn ensure_image_cached(base_url: &str, url: &str) -> Option<std::path::PathBuf> {
-    let full_url = if url.starts_with("http://") || url.starts_with("https://") {
-        url.to_string()
-    } else {
-        format!("{}{}", base_url, url)
-    };
-    let clean_url = url.split('?').next().unwrap_or(url);
-    let raw_name = Path::new(clean_url).file_name()?.to_str()?;
-    let safe_name: String = raw_name.chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
-        .collect();
-    let file_name = if safe_name.is_empty() { "image" } else { &safe_name };
+        // 2. Fast filesystem check
+        let clean_url = trimmed.split('?').next().unwrap_or(trimmed);
+        let raw_name = Path::new(clean_url).file_name().and_then(|s| s.to_str()).unwrap_or("image");
+        let safe_name: String = raw_name.chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+            .collect();
+        let file_name = if safe_name.is_empty() { "image" } else { &safe_name };
 
-    let cache_dir = Path::new(".cache/images");
-    let local_path = cache_dir.join(file_name);
-    if local_path.exists() && local_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
-        return Some(local_path);
-    }
-    let client = reqwest::Client::builder().danger_accept_invalid_certs(true).build().ok()?;
-    if let Ok(resp) = client.get(&full_url).send().await {
-        if resp.status().is_success() {
-            if let Ok(bytes) = resp.bytes().await {
-                let _ = tokio::fs::create_dir_all(cache_dir).await;
-                if tokio::fs::write(&local_path, &bytes).await.is_ok() {
-                    return Some(local_path);
+        let cache_dir = Path::new(".cache/images");
+        let local_path = cache_dir.join(file_name);
+
+        if local_path.exists() && local_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+            self.image_cache.lock().unwrap().insert(trimmed.to_string(), local_path.clone());
+            return Some(local_path);
+        }
+
+        // 3. Spawn background download
+        let full_url = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            trimmed.to_string()
+        } else {
+            format!("{}{}", self.base_url, trimmed)
+        };
+        let client = self.http_client.clone();
+        let cache_map = self.image_cache.clone();
+        let url_key = trimmed.to_string();
+
+        tokio::spawn(async move {
+            if let Ok(resp) = client.get(&full_url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(bytes) = resp.bytes().await {
+                        let _ = tokio::fs::create_dir_all(cache_dir).await;
+                        if tokio::fs::write(&local_path, &bytes).await.is_ok() {
+                            cache_map.lock().unwrap().insert(url_key, local_path);
+                        }
+                    }
                 }
             }
-        }
+        });
+
+        None
     }
-    None
 }
 
-async fn process_message(
+fn process_message(
     m: ChatMessageItem,
-    base_url: &str,
+    cache_mgr: &Arc<CacheManager>,
     user_avatars: &Arc<Mutex<HashMap<String, String>>>,
 ) -> ProcessedMessage {
     let username = m.username.unwrap_or_else(|| "Unknown".to_string());
@@ -1116,14 +1299,10 @@ async fn process_message(
         map.get(&username).cloned()
     });
 
-    let local_avatar_path = if let Some(av) = avatar_url {
-        ensure_cached_avatar_as_png(base_url, &av).await
-    } else {
-        None
-    };
+    let local_avatar_path = avatar_url.and_then(|av| cache_mgr.get_avatar_fast(&av));
 
     let local_image_path = if is_image && !attachment_url.is_empty() {
-        ensure_image_cached(base_url, &attachment_url).await
+        cache_mgr.get_image_fast(&attachment_url)
     } else {
         None
     };

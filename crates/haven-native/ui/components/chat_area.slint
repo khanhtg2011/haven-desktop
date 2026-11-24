@@ -26,10 +26,12 @@ export component ChatArea inherits Rectangle {
     in-out property <string> channel-topic: "Kênh thảo luận cộng đồng Haven - 100% Native Rust Client";
     in-out property <string> current-input: "";
     in-out property <[MessageData]> messages: [];
+    in-out property <bool> is-voice-connected: false;
 
     callback send-message(string);
     callback pick-attachment();
     callback open-attachment(string);
+    callback toggle-voice();
 
     VerticalLayout {
         // Chat Header
@@ -80,10 +82,45 @@ export component ChatArea inherits Rectangle {
                     }
                 }
 
-                // Right: Action Icons (Search, Bell, Pin, Members)
+                // Right: Action Icons (Voice Button, Search, Bell, Pin, Members)
                 HorizontalLayout {
-                    spacing: 12px;
+                    spacing: 10px;
                     alignment: center;
+
+                    // "Tham gia Voice" button matching Haven Web / Image 1
+                    Rectangle {
+                        height: 28px;
+                        border-radius: 4px;
+                        background: root.is-voice-connected ? #248046 : (voice-btn-touch.has-hover ? #35373c : #2b2d31);
+                        border-width: 1px;
+                        border-color: root.is-voice-connected ? #23a55a : #3f4147;
+
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            spacing: 6px;
+                            alignment: center;
+
+                            Text {
+                                text: root.is-voice-connected ? "●" : "🎧";
+                                color: root.is-voice-connected ? #57f287 : Theme.text-white;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+
+                            Text {
+                                text: root.is-voice-connected ? "Rời Voice" : "Tham gia Voice";
+                                color: Theme.text-white;
+                                font-size: 12px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        voice-btn-touch := TouchArea {
+                            clicked => { root.toggle-voice(); }
+                        }
+                    }
 
                     Text {
                         text: "🔔";
