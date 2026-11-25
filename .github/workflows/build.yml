@@ -136,14 +136,15 @@ jobs:
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name || 'v1.8.8' }}
-          name: Haven Desktop ${{ github.ref_name || 'v1.8.8' }}
+          tag_name: ${{ github.ref_name || 'v1.8.9' }}
+          name: Haven Desktop ${{ github.ref_name || 'v1.8.9' }}
+          make_latest: true
           body: |
-            ## ⬡ Haven Desktop ${{ github.ref_name || 'v1.8.8' }} (Deep Performance & Memory Optimization)
+            ## ⬡ Haven Desktop ${{ github.ref_name || 'v1.8.9' }} (Deep Performance & Memory Optimization)
             
             Official multi-platform client application for **Haven** featuring deep performance optimizations & expanded format support:
             
-            ### 🚀 What's New in v1.8.8:
+            ### 🚀 What's New in v1.8.9:
             - **Dynamic State-Aware Throttling**: Background CPU drops to < 0.5% when idle; automatically switches to high performance when entering voice calls.
             - **Splash Screen Auto-Cleanup**: Destroys background CSS animations once the main chat view expands, freeing GPU cycles.
             - **Lazy-Loaded Server Views**: Eliminates unwanted background BrowserViews on startup (`BACKGROUND_SERVER_CAP = 0`), saving ~200 MB RAM.
