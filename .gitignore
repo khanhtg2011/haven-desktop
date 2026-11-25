@@ -23,6 +23,15 @@ build/
 build/Release/
 *.node
 
+# Local artifacts & split companion workspaces
+*.apk
+*.aab
+.arena/
+.gemini/
+haven_session.json
+crates/
+src-tauri/
+
 # OS & Editor
 .DS_Store
 Thumbs.db

@@ -1,10 +1,10 @@
-# ⬡ Haven Desktop (Ultra-Optimized Edition)
+# ⬡ Haven Desktop (Electron Edition)
 
 [![Release](https://img.shields.io/github/v/release/khanhtg2011/haven-desktop?style=flat-square&color=blue)](https://github.com/khanhtg2011/haven-desktop/releases/latest)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/khanhtg2011/haven-desktop/build.yml?branch=main&style=flat-square)](https://github.com/khanhtg2011/haven-desktop/actions)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-orange.svg?style=flat-square)](LICENSE)
 
-The official multi-platform desktop client for **[Haven](https://github.com/khanhtg2011/haven)**, deeply optimized for gaming, low latency voice reliability, and minimal CPU & memory footprint.
+The official **Electron** multi-platform desktop client for **[Haven](https://github.com/khanhtg2011/haven)**, deeply optimized for gaming, low-latency voice reliability with native C++ WASAPI/PulseAudio capture, and minimal CPU & memory footprint.
 
 ---
 
@@ -79,8 +79,9 @@ cd haven-desktop
 npm install
 ```
 
-### Running in Development
+### Running & Verifying in Development
 ```bash
+npm test
 npm run dev
 ```
 
@@ -99,6 +100,9 @@ npm run build:linux
 ---
 
 ## 🤝 Ecosystem
+- **[Haven Desktop (Tauri)](https://github.com/khanhtg2011/haven-desktop-tauri)**: Lightweight Tauri v2 desktop wrapper edition.
+- **[Haven Mobile](https://github.com/khanhtg2011/haven-mobile)**: Android mobile client powered by Tauri v2.
+- **[Haven Native](https://github.com/khanhtg2011/haven-native)**: 100% Pure Rust + Slint native desktop client (Zero WebView2).
 - **Haven Music Bot & Discord Bridge**: Lightweight WebRTC audio companion bots.
 
 ---
